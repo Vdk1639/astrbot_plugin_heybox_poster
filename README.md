@@ -106,4 +106,4 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 
 ## 许可
 
-本项目以 [MIT License](LICENSE) 发布。第三方组件与参考项目见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目以 [MIT License](LICENSE) 发布，© 2026 Vdk1639。第三方组件与参考项目见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
