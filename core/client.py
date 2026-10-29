@@ -345,12 +345,11 @@ class XhhClient:
         path = "/bbs/app/api/link/post"
         try:
             payload = await self.request("POST", path, form=form, write=True)
+            result = self._unwrap(payload, path)
         except NetworkError:
             if self.outbox is not None:
                 self.outbox.mark_unknown(fingerprint)
             raise
-        try:
-            result = self._unwrap(payload, path)
         except Exception:
             if self.outbox is not None:
                 self.outbox.mark_failed(fingerprint)

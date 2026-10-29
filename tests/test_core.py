@@ -242,6 +242,19 @@ class ClientTests(unittest.TestCase):
             asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
         self.assertEqual(outbox.pending_rows(), [])
 
+    def test_request_error_clears_pending(self):
+        outbox = self._outbox()
+        client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
+        client.outbox = outbox
+
+        async def fail_request(method, path, *, params=None, form=None, write=False):
+            raise XhhError("服务端错误 HTTP 500")
+
+        client.request = fail_request
+        with self.assertRaises(XhhError):
+            asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
+        self.assertEqual(outbox.pending_rows(), [])
+
     def test_network_error_wrapped(self):
         client, _ = self._client(
             {},
