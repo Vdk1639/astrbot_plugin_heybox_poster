@@ -1,0 +1,47 @@
+{
+  "cookie": {
+    "description": "完整 Cookie 串，必须含 user_pkey（登录态）与 x_xhh_tokenid（风控）。留空则用下面的 user_pkey / x_xhh_tokenid 拼接。",
+    "type": "string",
+    "default": ""
+  },
+  "user_pkey": {
+    "description": "登录态 Cookie user_pkey 的值（cookie 留空时使用）",
+    "type": "string",
+    "default": ""
+  },
+  "x_xhh_tokenid": {
+    "description": "风控 Cookie x_xhh_tokenid 的值（cookie 留空时使用）；缺失会返回 show_captcha",
+    "type": "string",
+    "default": ""
+  },
+  "heybox_id": {
+    "description": "当前账号 heybox_id，会作为公共参数发送；留空则仅依赖 cookie",
+    "type": "string",
+    "default": ""
+  },
+  "default_topic_ids": {
+    "description": "默认社区/话题 ID，多个用英文逗号分隔；发帖时没指定话题就用它",
+    "type": "string",
+    "default": ""
+  },
+  "allowed_users": {
+    "description": "允许发帖的发送者 ID 白名单；留空表示所有能触发机器人的用户都可发帖",
+    "type": "list",
+    "default": []
+  },
+  "cooldown_seconds": {
+    "description": "同一用户两次发帖的最小间隔（秒），0 表示不限制",
+    "type": "int",
+    "default": 60
+  },
+  "dry_run": {
+    "description": "只构造表单、不真正提交；首次部署建议先开启验证字段",
+    "type": "bool",
+    "default": true
+  },
+  "request_timeout": {
+    "description": "单次请求超时（秒）",
+    "type": "int",
+    "default": 20
+  }
+}
