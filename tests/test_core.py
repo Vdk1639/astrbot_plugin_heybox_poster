@@ -231,6 +231,17 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(RateLimited):
             asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
 
+    def test_rate_limited_clears_pending(self):
+        outbox = self._outbox()
+        client, _ = self._client(
+            {"status": "failed", "msg": "发帖频率过快，请稍后再试:10006#02"},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
+        client.outbox = outbox
+        with self.assertRaises(RateLimited):
+            asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
+        self.assertEqual(outbox.pending_rows(), [])
+
     def test_network_error_wrapped(self):
         client, _ = self._client(
             {},

@@ -349,7 +349,12 @@ class XhhClient:
             if self.outbox is not None:
                 self.outbox.mark_unknown(fingerprint)
             raise
-        result = self._unwrap(payload, path)
+        try:
+            result = self._unwrap(payload, path)
+        except Exception:
+            if self.outbox is not None:
+                self.outbox.mark_failed(fingerprint)
+            raise
         link_id = str(result.get("link_id") or result.get("linkid") or "")
         if not link_id and not draft:
             # 服务端不回 link_id 时，只在「发帖前基线之外的新条目」里认领。
