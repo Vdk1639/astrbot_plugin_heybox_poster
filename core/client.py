@@ -392,7 +392,10 @@ class XhhClient:
         path = "/bbs/app/link/delete"
         form = {"link_id": str(link_id)}
         payload = await self.request("POST", path, form=form, write=True)
-        return self._unwrap(payload, path)
+        result = self._unwrap(payload, path)
+        if self.outbox is not None:
+            self.outbox.remove_by_link_id(str(link_id))
+        return result
 
     async def _my_recent_links(self, limit: int = 20) -> list[dict]:
         """当前账号最近的帖子条目，供发帖后对账使用。"""

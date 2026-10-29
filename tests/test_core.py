@@ -197,6 +197,15 @@ class ClientTests(unittest.TestCase):
         body = dict(urllib.parse.parse_qsl(captured[0].data.decode("utf-8")))
         self.assertEqual(body["link_id"], "195381907")
 
+    def test_delete_link_cleans_outbox(self):
+        outbox = self._outbox()
+        outbox.mark_pending("fp", {"title": "a"})
+        outbox.mark_sent("fp", "195381907")
+        client, _ = self._client({"status": "ok", "result": {}})
+        client.outbox = outbox
+        asyncio.run(client.delete_link("195381907"))
+        self.assertEqual(outbox.remove_by_link_id("195381907"), 0)
+
     def test_show_captcha_raises(self):
         client, _ = self._client(
             {"status": "show_captcha", "result": {}, "msg": ""},

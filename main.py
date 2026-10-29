@@ -32,7 +32,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.1.0",
+    "0.2.0",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -344,9 +344,8 @@ class XhhPosterPlugin(Star):
             return
         try:
             result = await self._get_client().delete_link(link_id)
-            removed = self._get_outbox().remove_by_link_id(link_id)
             yield event.plain_result(
-                f"已删除 link_id={link_id}（outbox 清理 {removed} 条记录），result={result}"
+                f"已删除 link_id={link_id}，result={result}"
             )
         except Exception as exc:
             yield event.plain_result(self._friendly_error(exc))

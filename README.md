@@ -19,6 +19,8 @@ AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册
 2. 重启 AstrBot（或在 WebUI 插件页重载）；
 3. 打开插件配置，填入 cookie。
 
+升级到 v0.2.0 时，插件目录下旧的 `outbox.sqlite3` 会自动迁移到 AstrBot 插件数据目录，去重与对账记录保留。
+
 ### 获取 Cookie
 
 发帖接口依赖两个值：
@@ -63,6 +65,8 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | `cooldown_seconds` | int | 60 | 同一用户两次发帖的最小间隔；0 = 不限制 |
 | `dry_run` | bool | true | 只回显表单、不真正提交；首次部署建议保持开启 |
 | `request_timeout` | int | 20 | 单次请求超时（秒） |
+| `outbox_path` | string | 空 | 发帖 outbox 数据库路径；留空则用 AstrBot 插件数据目录 |
+| `outbox_dedup_seconds` | int | 600 | 相同内容去重窗口（秒） |
 
 ## 使用
 
