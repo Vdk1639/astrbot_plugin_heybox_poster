@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -63,6 +65,12 @@ class CaptchaRequired(XhhError):
 
 class RateLimited(XhhError):
     """触发发帖限流（错误码 ``10006``），调用方应提示稍后再试，不自动重试。"""
+
+
+def content_fingerprint(title: str, content: str) -> str:
+    """发帖内容的幂等指纹：``标题 + 换行 + 正文`` 的 SHA-1。"""
+    material = f"{(title or '').strip()}\n{(content or '').strip()}"
+    return hashlib.sha1(material.encode("utf-8")).hexdigest()
 
 
 def build_post_form(
@@ -296,38 +304,80 @@ class XhhClient:
             desc=desc,
             view_limit=view_limit,
         )
+        fingerprint = content_fingerprint(title, content)
+        posted_at = time.time()
+        baseline_ids: set[str] = set()
+        if not draft:
+            try:
+                for item in await self._my_recent_links(20):
+                    lid = item.get("linkid") or item.get("link_id")
+                    if lid:
+                        baseline_ids.add(str(lid))
+            except Exception:
+                baseline_ids = set()
         path = "/bbs/app/api/link/post"
         payload = await self.request("POST", path, form=form, write=True)
         result = self._unwrap(payload, path)
         link_id = str(result.get("link_id") or result.get("linkid") or "")
         if not link_id and not draft:
-            # 线上发帖成功后 result 可能是空对象，回查最新帖子兜底。
-            link_id = await self._find_recent_link_id(title)
-        return {"link_id": link_id, "is_draft": draft, "raw": result}
+            # 服务端不回 link_id 时，只在「发帖前基线之外的新条目」里认领。
+            link_id = await self._reconcile_link_id(title, baseline_ids, posted_at)
+        return {
+            "link_id": link_id,
+            "is_draft": draft,
+            "raw": result,
+            "fingerprint": fingerprint,
+        }
 
-    async def _find_recent_link_id(self, title: str, limit: int = 5) -> str:
-        """按标题回查自己最近的帖子，用于服务端不回 link_id 的情况。"""
+    async def _my_recent_links(self, limit: int = 20) -> list[dict]:
+        """当前账号最近的帖子条目，供发帖后对账使用。"""
+        if not self.heybox_id:
+            return []
+        path = "/bbs/app/profile/user/link/list_v2"
+        payload = await self.request(
+            "GET",
+            path,
+            params={"userid": self.heybox_id, "offset": 0, "limit": limit},
+        )
+        result = self._unwrap(payload, path)
+        items = result.get("post_links") or []
+        return [item for item in items if isinstance(item, dict)]
+
+    async def _reconcile_link_id(
+        self,
+        title: str,
+        baseline_ids: set[str],
+        posted_at: float,
+        limit: int = 20,
+    ) -> str:
+        """在基线之外的新条目里回查 link_id，并按时间窗口过滤。"""
         target = (title or "").strip()
         if not target or not self.heybox_id:
             return ""
-        path = "/bbs/app/profile/user/link/list_v2"
         try:
-            payload = await self.request(
-                "GET",
-                path,
-                params={"userid": self.heybox_id, "offset": 0, "limit": limit},
-            )
-            result = self._unwrap(payload, path)
+            items = await self._my_recent_links(limit)
         except Exception:
             return ""
-        for item in result.get("post_links") or []:
-            if not isinstance(item, dict):
+        for item in items:
+            lid = item.get("linkid") or item.get("link_id")
+            if not lid:
+                continue
+            lid = str(lid)
+            if lid in baseline_ids:
                 continue
             if str(item.get("title") or "").strip() != target:
                 continue
-            link_id = item.get("linkid") or item.get("link_id")
-            if link_id:
-                return str(link_id)
+            ts = item.get("create_time") or item.get("created_at") or item.get("time")
+            if ts is not None:
+                try:
+                    t = float(ts)
+                    if t > 10_000_000_000:  # 毫秒时间戳
+                        t /= 1000
+                    if t < posted_at - 120:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            return lid
         return ""
 
     async def comment(self, link_id: int | str, text: str, *,

@@ -10,6 +10,7 @@ import io
 import json
 import pathlib
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -124,12 +125,14 @@ class PostFormTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
-    def _client(self, payload: dict) -> tuple[XhhClient, list]:
+    def _client(self, payload: dict, *, list_payload: dict | None = None) -> tuple[XhhClient, list]:
         client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
         captured: list = []
 
         def fake_urlopen(req, timeout=None):
             captured.append(req)
+            if list_payload is not None and "/bbs/app/profile/user/link/list_v2" in req.full_url:
+                return FakeResponse(list_payload)
             return FakeResponse(payload)
 
         patcher = mock.patch("urllib.request.urlopen", side_effect=fake_urlopen)
@@ -138,11 +141,14 @@ class ClientTests(unittest.TestCase):
         return client, captured
 
     def test_publish_sends_signed_form(self):
-        client, captured = self._client({"status": "ok", "result": {"link_id": "999"}})
+        client, captured = self._client(
+            {"status": "ok", "result": {"link_id": "999"}},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
         result = asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
         self.assertEqual(result["link_id"], "999")
 
-        req = captured[0]
+        req = [r for r in captured if r.get_method() == "POST"][0]
         self.assertEqual(req.get_method(), "POST")
         query = _query(req.full_url)
         self.assertIn("hkey", query)
@@ -167,28 +173,67 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(body["reply_id"], "-1")
 
     def test_show_captcha_raises(self):
-        client, _ = self._client({"status": "show_captcha", "result": {}, "msg": ""})
+        client, _ = self._client(
+            {"status": "show_captcha", "result": {}, "msg": ""},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
         with self.assertRaises(CaptchaRequired):
             asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
 
     def test_business_error_raises(self):
-        client, _ = self._client({"status": "failed", "msg": "请添加分区"})
+        client, _ = self._client(
+            {"status": "failed", "msg": "请添加分区"},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
         with self.assertRaises(XhhError) as ctx:
             asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
         self.assertIn("请添加分区", str(ctx.exception))
 
     def test_rate_limited_raises(self):
         client, _ = self._client(
-            {"status": "failed", "msg": "发帖频率过快，请稍后再试:10006#02"}
+            {"status": "failed", "msg": "发帖频率过快，请稍后再试:10006#02"},
+            list_payload={"status": "ok", "result": {"post_links": []}},
         )
         with self.assertRaises(RateLimited):
             asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
 
     def test_network_error_wrapped(self):
-        client, _ = self._client({})
+        client, _ = self._client(
+            {},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
         with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
             with self.assertRaises(XhhError):
                 asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
+
+    def test_reconcile_claims_only_new_items(self):
+        client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
+        now = time.time()
+
+        async def recent(limit=20):
+            return [
+                {"linkid": "1", "title": "标题", "create_time": int(now)},
+                {"linkid": "2", "title": "标题", "create_time": int(now)},
+            ]
+
+        client._my_recent_links = recent
+        self.assertEqual(
+            asyncio.run(client._reconcile_link_id("标题", {"1"}, now - 5)),
+            "2",
+        )
+
+    def test_reconcile_skips_old_timestamp(self):
+        client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
+        now = time.time()
+
+        async def recent(limit=20):
+            return [{"linkid": "3", "title": "标题", "create_time": int(now - 600)}]
+
+        client._my_recent_links = recent
+        self.assertEqual(
+            asyncio.run(client._reconcile_link_id("标题", set(), now)),
+            "",
+        )
 
 
 if __name__ == "__main__":
