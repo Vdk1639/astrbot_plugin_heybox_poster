@@ -180,6 +180,22 @@ class XhhPosterPlugin(Star):
             self._locks[sender] = lock
         return lock
 
+    def _friendly_error(self, exc: Exception) -> str:
+        """按业务类型给出对用户友好的中文提示。"""
+        if isinstance(exc, CaptchaRequired):
+            return f"被风控验证码拦截：{exc}。请更新 cookie 里的 x_xhh_tokenid 后重试。"
+        if isinstance(exc, RateLimited):
+            return str(exc)
+        if isinstance(exc, NetworkError):
+            return f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
+        if isinstance(exc, XhhError):
+            if exc.status in {"login", "relogin", "expired"}:
+                return "登录态失效，请重新配置 cookie。"
+            return str(exc)
+        if isinstance(exc, ValueError):
+            return f"参数错误：{exc}"
+        return f"发帖失败：{type(exc).__name__}: {exc}"
+
     # ------------------------------------------------------------------
     # 手动指令
     # ------------------------------------------------------------------
@@ -247,16 +263,8 @@ class XhhPosterPlugin(Star):
                     yield event.plain_result(
                         f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
                     )
-            except CaptchaRequired as exc:
-                yield event.plain_result(f"被风控拦了：{exc}。请用 xiaoheihe-cli 重新登录或更新 x_xhh_tokenid。")
-            except RateLimited as exc:
-                yield event.plain_result(str(exc))
-            except NetworkError as exc:
-                yield event.plain_result(
-                    f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
-                )
             except Exception as exc:
-                yield event.plain_result(f"发帖失败：{type(exc).__name__}: {exc}")
+                yield event.plain_result(self._friendly_error(exc))
 
     @filter.command("xhh话题")
     async def cmd_topics(self, event: AstrMessageEvent):
@@ -361,14 +369,8 @@ class XhhPosterPlugin(Star):
                     draft=draft,
                     view_limit=view_limit,
                 )
-            except CaptchaRequired as exc:
-                return f"被风控验证码拦截（{exc}），请更新 cookie 里的 x_xhh_tokenid 后重试。"
-            except RateLimited as exc:
-                return str(exc)
-            except NetworkError as exc:
-                return f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
             except Exception as exc:
-                return f"发帖失败：{type(exc).__name__}: {exc}"
+                return self._friendly_error(exc)
 
         if result.get("duplicate"):
             return (

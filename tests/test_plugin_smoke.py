@@ -75,6 +75,12 @@ _install_astrbot_stubs()
 sys.path.insert(0, str(ROOT.parent))
 
 from astrbot_plugin_heybox_poster.main import XhhPosterPlugin  # noqa: E402
+from astrbot_plugin_heybox_poster.core.client import (  # noqa: E402
+    CaptchaRequired,
+    NetworkError,
+    RateLimited,
+    XhhError,
+)
 
 
 class FakeClient:
@@ -120,6 +126,14 @@ class PluginSmokeTests(unittest.TestCase):
         plugin = self._plugin()
         self.assertIs(plugin._lock_for("10001"), plugin._lock_for("10001"))
         self.assertIsNot(plugin._lock_for("10001"), plugin._lock_for("20002"))
+
+    def test_friendly_error_categories(self):
+        plugin = self._plugin()
+        self.assertIn("风控", plugin._friendly_error(CaptchaRequired("触发验证码")))
+        self.assertIn("稍后再试", plugin._friendly_error(RateLimited("发帖频率过快，请稍后再试")))
+        self.assertIn("网络", plugin._friendly_error(NetworkError("连接超时")))
+        self.assertIn("登录态", plugin._friendly_error(XhhError("登录失败", status="login")))
+        self.assertIn("参数错误", plugin._friendly_error(ValueError("标题不能为空")))
 
     def test_resolve_topics_by_name(self):
         plugin = self._plugin()
