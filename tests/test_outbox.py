@@ -80,6 +80,31 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(box.remove_by_link_id("111"), 1)
         self.assertEqual(box.remove_by_link_id("999"), 0)
 
+    def test_purge_by_status(self):
+        box = self._outbox()
+        box.mark_pending("fp1", {"title": "a"})
+        box.mark_failed("fp1")
+        box.mark_pending("fp2", {"title": "b"})
+        box.mark_sent("fp2", "1")
+        self.assertEqual(box.purge(status="failed"), 1)
+        self.assertEqual(box.remove_by_link_id("1"), 1)
+
+    def test_purge_older_than(self):
+        import astrbot_plugin_heybox_poster.core.outbox as outbox_mod
+
+        box = self._outbox()
+        clock = {"now": 1000.0}
+        with mock.patch.object(
+            outbox_mod.time, "time", side_effect=lambda: clock["now"]
+        ):
+            box.mark_pending("fp1", {"title": "a"})
+            box.mark_failed("fp1")
+            clock["now"] = 1000.0 + 10 * 86400
+            box.mark_pending("fp2", {"title": "b"})
+            box.mark_failed("fp2")
+            removed = box.purge(status="failed", older_than_days=7)
+            self.assertEqual(removed, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import sys
+import time
 import types
 import unittest
 
@@ -138,6 +139,30 @@ class PluginSmokeTests(unittest.TestCase):
     def test_default_outbox_path_falls_back(self):
         plugin = self._plugin()
         self.assertEqual(plugin._default_outbox_path().name, "outbox.sqlite3")
+
+    def test_rate_limit_block(self):
+        plugin = self._plugin()
+        plugin._rate_limit_until["10001"] = time.time() + 60
+        self.assertIn("秒后再试", plugin._rate_limit_block("10001"))
+        self.assertEqual(plugin._rate_limit_block("20002"), "")
+
+    def test_tool_publish_rate_limited_sets_cooldown(self):
+        from astrbot_plugin_heybox_poster.core.client import RateLimited
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin()
+        event = AstrMessageEvent("10001")
+
+        class FailingClient:
+            async def publish(self, *args, **kwargs):
+                raise RateLimited("发帖频率过快，请稍后再试")
+
+        plugin._get_client = lambda: FailingClient()
+        result = asyncio.run(
+            plugin.tool_publish(event, "标题", "正文", topic_ids="43")
+        )
+        self.assertIn("稍后再试", result)
+        self.assertGreater(plugin._rate_limit_until.get("10001", 0), time.time())
 
     def test_resolve_topics_by_name(self):
         plugin = self._plugin()

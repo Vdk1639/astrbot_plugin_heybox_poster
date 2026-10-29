@@ -32,7 +32,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.2.2",
+    "0.3.0",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -43,6 +43,7 @@ class XhhPosterPlugin(Star):
         self._last_post_at: dict[str, float] = {}
         self._outbox: Outbox | None = None
         self._locks: dict[str, asyncio.Lock] = {}
+        self._rate_limit_until: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # 配置 / 客户端
@@ -163,6 +164,13 @@ class XhhPosterPlugin(Star):
                 logger.info(f"[{PLUGIN_NAME}] outbox 对账认领 {claimed} 条 send_unknown 帖子")
         except Exception:
             pass
+        try:
+            days = int(self._c("outbox_purge_days", 7) or 7)
+            purged = self._get_outbox().purge(status="failed", older_than_days=days)
+            if purged:
+                logger.info(f"[{PLUGIN_NAME}] 清理 {purged} 条过期 failed 记录")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 权限 / 频控
@@ -208,6 +216,17 @@ class XhhPosterPlugin(Star):
             lock = asyncio.Lock()
             self._locks[sender] = lock
         return lock
+
+    def _rate_limit_seconds(self) -> int:
+        return max(0, int(self._c("rate_limit_cooldown_seconds", 600) or 600))
+
+    def _rate_limit_block(self, sender: str) -> str:
+        """命中限流后的本地冷却；返回空串表示不在冷却期。"""
+        until = self._rate_limit_until.get(sender, 0)
+        if time.time() < until:
+            wait = int(until - time.time()) + 1
+            return f"刚触发限流，请 {wait} 秒后再试。"
+        return ""
 
     def _friendly_error(self, exc: Exception) -> str:
         """按业务类型给出对用户友好的中文提示。"""
@@ -272,6 +291,10 @@ class XhhPosterPlugin(Star):
         title, text = parts[0], parts[1]
         topic = parts[2] if len(parts) > 2 else ""
         async with self._lock_for(self._sender(event)):
+            block = self._rate_limit_block(self._sender(event))
+            if block:
+                yield event.plain_result(block)
+                return
             wait = self._check_cooldown(event)
             if wait:
                 yield event.plain_result(wait)
@@ -302,6 +325,10 @@ class XhhPosterPlugin(Star):
                         f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
                     )
             except Exception as exc:
+                if isinstance(exc, RateLimited):
+                    self._rate_limit_until[self._sender(event)] = (
+                        time.time() + self._rate_limit_seconds()
+                    )
                 self._log_error(exc)
                 yield event.plain_result(self._friendly_error(exc))
 
@@ -436,6 +463,9 @@ class XhhPosterPlugin(Star):
         if not self._is_allowed(event):
             return "当前用户没有发帖权限。"
         async with self._lock_for(self._sender(event)):
+            block = self._rate_limit_block(self._sender(event))
+            if block:
+                return block
             wait = self._check_cooldown(event)
             if wait:
                 return wait
@@ -461,6 +491,10 @@ class XhhPosterPlugin(Star):
                     view_limit=view_limit,
                 )
             except Exception as exc:
+                if isinstance(exc, RateLimited):
+                    self._rate_limit_until[self._sender(event)] = (
+                        time.time() + self._rate_limit_seconds()
+                    )
                 self._log_error(exc)
                 return self._friendly_error(exc)
 

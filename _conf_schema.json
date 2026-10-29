@@ -69,5 +69,15 @@
     "description": "相同内容去重窗口（秒），窗口内已发送成功的相同内容会直接拒绝重发",
     "type": "int",
     "default": 600
+  },
+  "rate_limit_cooldown_seconds": {
+    "description": "命中限流后的本地冷却时间（秒），期间直接拒绝发帖",
+    "type": "int",
+    "default": 600
+  },
+  "outbox_purge_days": {
+    "description": "启动时清理多少天前的 failed 记录；0 表示不清理",
+    "type": "int",
+    "default": 7
   }
 }
