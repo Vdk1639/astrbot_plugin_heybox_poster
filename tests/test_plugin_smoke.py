@@ -116,6 +116,11 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertEqual(plugin._check_cooldown(event), "")
         self.assertIn("太频繁", plugin._check_cooldown(event))
 
+    def test_lock_per_sender(self):
+        plugin = self._plugin()
+        self.assertIs(plugin._lock_for("10001"), plugin._lock_for("10001"))
+        self.assertIsNot(plugin._lock_for("10001"), plugin._lock_for("20002"))
+
     def test_resolve_topics_by_name(self):
         plugin = self._plugin()
         plugin._get_client = lambda: FakeClient()

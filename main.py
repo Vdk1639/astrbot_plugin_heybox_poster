@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ class XhhPosterPlugin(Star):
         self._client_cookie = ""
         self._last_post_at: dict[str, float] = {}
         self._outbox: Outbox | None = None
+        self._locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # 配置 / 客户端
@@ -82,8 +84,6 @@ class XhhPosterPlugin(Star):
             if self._client is not None:
                 # 旧客户端交给事件循环回收，这里不阻塞
                 try:
-                    import asyncio
-
                     asyncio.create_task(self._client.close())
                 except Exception:
                     pass
@@ -167,6 +167,19 @@ class XhhPosterPlugin(Star):
         self._last_post_at[sender] = now
         return ""
 
+    def _sender(self, event: AstrMessageEvent) -> str:
+        try:
+            return str(event.get_sender_id())
+        except Exception:
+            return "unknown"
+
+    def _lock_for(self, sender: str) -> asyncio.Lock:
+        lock = self._locks.get(sender)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[sender] = lock
+        return lock
+
     # ------------------------------------------------------------------
     # 手动指令
     # ------------------------------------------------------------------
@@ -204,45 +217,46 @@ class XhhPosterPlugin(Star):
 
         title, text = parts[0], parts[1]
         topic = parts[2] if len(parts) > 2 else ""
-        wait = self._check_cooldown(event)
-        if wait:
-            yield event.plain_result(wait)
-            return
-
-        try:
-            topic_ids = await self._resolve_topics(topic)
-            view_limit = self._view_limit()
-            if self._c("dry_run", False):
-                form = build_post_form(
-                    title, text, topic_ids=topic_ids, view_limit=view_limit
-                )
-                yield event.plain_result(f"[dry-run] 将提交：{form}")
+        async with self._lock_for(self._sender(event)):
+            wait = self._check_cooldown(event)
+            if wait:
+                yield event.plain_result(wait)
                 return
-            result = await self._get_client().publish(
-                title,
-                text,
-                mode="dynamic",
-                topic_ids=topic_ids,
-                view_limit=view_limit,
-            )
-            if result.get("duplicate"):
-                yield event.plain_result(
-                    f"相同内容在去重窗口内已发送过，link_id={result.get('link_id') or '（未知）'}"
+
+            try:
+                topic_ids = await self._resolve_topics(topic)
+                view_limit = self._view_limit()
+                if self._c("dry_run", False):
+                    form = build_post_form(
+                        title, text, topic_ids=topic_ids, view_limit=view_limit
+                    )
+                    yield event.plain_result(f"[dry-run] 将提交：{form}")
+                    return
+                result = await self._get_client().publish(
+                    title,
+                    text,
+                    mode="dynamic",
+                    topic_ids=topic_ids,
+                    view_limit=view_limit,
                 )
-            else:
+                if result.get("duplicate"):
+                    yield event.plain_result(
+                        f"相同内容在去重窗口内已发送过，link_id={result.get('link_id') or '（未知）'}"
+                    )
+                else:
+                    yield event.plain_result(
+                        f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
+                    )
+            except CaptchaRequired as exc:
+                yield event.plain_result(f"被风控拦了：{exc}。请用 xiaoheihe-cli 重新登录或更新 x_xhh_tokenid。")
+            except RateLimited as exc:
+                yield event.plain_result(str(exc))
+            except NetworkError as exc:
                 yield event.plain_result(
-                    f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
+                    f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
                 )
-        except CaptchaRequired as exc:
-            yield event.plain_result(f"被风控拦了：{exc}。请用 xiaoheihe-cli 重新登录或更新 x_xhh_tokenid。")
-        except RateLimited as exc:
-            yield event.plain_result(str(exc))
-        except NetworkError as exc:
-            yield event.plain_result(
-                f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
-            )
-        except Exception as exc:
-            yield event.plain_result(f"发帖失败：{type(exc).__name__}: {exc}")
+            except Exception as exc:
+                yield event.plain_result(f"发帖失败：{type(exc).__name__}: {exc}")
 
     @filter.command("xhh话题")
     async def cmd_topics(self, event: AstrMessageEvent):
@@ -322,14 +336,24 @@ class XhhPosterPlugin(Star):
         """
         if not self._is_allowed(event):
             return "当前用户没有发帖权限。"
-        wait = self._check_cooldown(event)
-        if wait:
-            return wait
-        try:
-            ids = await self._resolve_topics(topic, topic_ids)
-            view_limit = self._view_limit()
-            if self._c("dry_run", False):
-                form = build_post_form(
+        async with self._lock_for(self._sender(event)):
+            wait = self._check_cooldown(event)
+            if wait:
+                return wait
+            try:
+                ids = await self._resolve_topics(topic, topic_ids)
+                view_limit = self._view_limit()
+                if self._c("dry_run", False):
+                    form = build_post_form(
+                        title,
+                        text,
+                        mode=mode,
+                        topic_ids=ids,
+                        draft=draft,
+                        view_limit=view_limit,
+                    )
+                    return f"[dry-run] 未真正提交，表单如下：{form}"
+                result = await self._get_client().publish(
                     title,
                     text,
                     mode=mode,
@@ -337,23 +361,14 @@ class XhhPosterPlugin(Star):
                     draft=draft,
                     view_limit=view_limit,
                 )
-                return f"[dry-run] 未真正提交，表单如下：{form}"
-            result = await self._get_client().publish(
-                title,
-                text,
-                mode=mode,
-                topic_ids=ids,
-                draft=draft,
-                view_limit=view_limit,
-            )
-        except CaptchaRequired as exc:
-            return f"被风控验证码拦截（{exc}），请更新 cookie 里的 x_xhh_tokenid 后重试。"
-        except RateLimited as exc:
-            return str(exc)
-        except NetworkError as exc:
-            return f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
-        except Exception as exc:
-            return f"发帖失败：{type(exc).__name__}: {exc}"
+            except CaptchaRequired as exc:
+                return f"被风控验证码拦截（{exc}），请更新 cookie 里的 x_xhh_tokenid 后重试。"
+            except RateLimited as exc:
+                return str(exc)
+            except NetworkError as exc:
+                return f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
+            except Exception as exc:
+                return f"发帖失败：{type(exc).__name__}: {exc}"
 
         if result.get("duplicate"):
             return (
