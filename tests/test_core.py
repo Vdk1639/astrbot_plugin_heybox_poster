@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT.parent))
 
 from astrbot_plugin_heybox_poster.core.client import (  # noqa: E402
     CaptchaRequired,
+    RateLimited,
     XhhClient,
     XhhError,
     build_post_form,
@@ -175,6 +176,13 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(XhhError) as ctx:
             asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
         self.assertIn("请添加分区", str(ctx.exception))
+
+    def test_rate_limited_raises(self):
+        client, _ = self._client(
+            {"status": "failed", "msg": "发帖频率过快，请稍后再试:10006#02"}
+        )
+        with self.assertRaises(RateLimited):
+            asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
 
     def test_network_error_wrapped(self):
         client, _ = self._client({})

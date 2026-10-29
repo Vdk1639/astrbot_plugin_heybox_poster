@@ -13,7 +13,13 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
-from .core.client import CaptchaRequired, XhhClient, XhhError, build_post_form
+from .core.client import (
+    CaptchaRequired,
+    RateLimited,
+    XhhClient,
+    XhhError,
+    build_post_form,
+)
 
 PLUGIN_NAME = "astrbot_plugin_heybox_poster"
 
@@ -201,6 +207,8 @@ class XhhPosterPlugin(Star):
             )
         except CaptchaRequired as exc:
             yield event.plain_result(f"被风控拦了：{exc}。请用 xiaoheihe-cli 重新登录或更新 x_xhh_tokenid。")
+        except RateLimited as exc:
+            yield event.plain_result(str(exc))
         except Exception as exc:
             yield event.plain_result(f"发帖失败：{type(exc).__name__}: {exc}")
 
@@ -308,6 +316,8 @@ class XhhPosterPlugin(Star):
             )
         except CaptchaRequired as exc:
             return f"被风控验证码拦截（{exc}），请更新 cookie 里的 x_xhh_tokenid 后重试。"
+        except RateLimited as exc:
+            return str(exc)
         except Exception as exc:
             return f"发帖失败：{type(exc).__name__}: {exc}"
 

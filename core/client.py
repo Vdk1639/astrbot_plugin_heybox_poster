@@ -61,6 +61,10 @@ class CaptchaRequired(XhhError):
     """命中风控验证码：``x_xhh_tokenid`` 缺失或过期。"""
 
 
+class RateLimited(XhhError):
+    """触发发帖限流（错误码 ``10006``），调用方应提示稍后再试，不自动重试。"""
+
+
 def build_post_form(
     title: str,
     content: str,
@@ -211,10 +215,17 @@ class XhhClient:
                 "触发风控验证码：cookie 里的 x_xhh_tokenid 缺失或已失效",
                 status=status, path=path,
             )
+        msg = str(payload.get("msg") or "")
+        code = payload.get("code") or payload.get("error_code")
+        if "10006" in msg or code in (10006, "10006"):
+            raise RateLimited(
+                "发帖频率过快，请稍后再试",
+                status=status, path=path, payload=payload,
+            )
         if status in _ERROR_STATUS:
-            msg = payload.get("msg") or f"status={status}"
             hint = "（登录态失效，请重新提供 cookie）" if status in {"login", "relogin", "expired"} else ""
-            raise XhhError(msg + hint, status=status, path=path, payload=payload)
+            raise XhhError((msg or f"status={status}") + hint,
+                           status=status, path=path, payload=payload)
         if status != "ok":
             raise XhhError(payload.get("msg") or f"status={status}",
                            status=status, path=path, payload=payload)

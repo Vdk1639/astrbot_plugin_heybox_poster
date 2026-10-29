@@ -2,6 +2,7 @@
 
 from .client import (
     CaptchaRequired,
+    RateLimited,
     XhhClient,
     XhhError,
     build_post_form,
@@ -10,6 +11,7 @@ from .sign import hkey, signed_params, workshop_rnd
 
 __all__ = [
     "CaptchaRequired",
+    "RateLimited",
     "XhhClient",
     "XhhError",
     "build_post_form",
