@@ -223,6 +223,23 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(XhhError):
                 asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
 
+    def test_search_topics_slices_locally(self):
+        client = XhhClient("user_pkey=abc; x_xhh_tokenid=def")
+
+        async def fake_request(method, path, *, params=None, form=None, write=False):
+            return {
+                "status": "ok",
+                "result": {
+                    "search_result": [
+                        {"topic_id": str(i), "name": f"话题{i}"} for i in range(5)
+                    ]
+                },
+            }
+
+        client.request = fake_request
+        topics = asyncio.run(client.search_topics("小黑盒", limit=3))
+        self.assertEqual(len(topics), 3)
+
     def test_reconcile_claims_only_new_items(self):
         client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
         now = time.time()

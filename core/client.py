@@ -287,6 +287,8 @@ class XhhClient:
             name = item.get("name") or item.get("topic_name") or ""
             if tid:
                 topics.append({"topic_id": str(tid), "name": str(name)})
+        if limit > 0:
+            topics = topics[:limit]
         return topics
 
     async def publish(
