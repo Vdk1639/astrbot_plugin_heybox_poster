@@ -15,7 +15,7 @@ from astrbot.api.star import Context, Star, register
 
 from .core.client import CaptchaRequired, XhhClient, XhhError, build_post_form
 
-PLUGIN_NAME = "astrbot_plugin_xhh_poster"
+PLUGIN_NAME = "astrbot_plugin_heybox_poster"
 
 
 @register(

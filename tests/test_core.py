@@ -18,13 +18,13 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
-from astrbot_plugin_xhh_poster.core.client import (  # noqa: E402
+from astrbot_plugin_heybox_poster.core.client import (  # noqa: E402
     CaptchaRequired,
     XhhClient,
     XhhError,
     build_post_form,
 )
-from astrbot_plugin_xhh_poster.core.sign import (  # noqa: E402
+from astrbot_plugin_heybox_poster.core.sign import (  # noqa: E402
     hkey,
     normalize_path,
     signed_params,

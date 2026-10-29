@@ -1,4 +1,4 @@
-# astrbot_plugin_xhh_poster
+# astrbot_plugin_heybox_poster
 
 AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册成 LLM 函数工具，
 同时保留手动指令。
@@ -25,7 +25,7 @@ AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册
 
 ## 安装
 
-1. 把整个 `astrbot_plugin_xhh_poster/` 目录放到 AstrBot 的 `data/plugins/` 下；
+1. 把整个 `astrbot_plugin_heybox_poster/` 目录放到 AstrBot 的 `data/plugins/` 下；
 2. 重启 AstrBot（或在 WebUI 插件页重载）；
 3. 打开插件配置，填 cookie。
 
@@ -95,7 +95,7 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 ## 目录结构
 
 ```text
-astrbot_plugin_xhh_poster/
+astrbot_plugin_heybox_poster/
 ├── main.py               # Star 插件：指令 + LLM 工具 + 配置/白名单/频控
 ├── core/sign.py          # hkey + Workshop _rnd
 ├── core/client.py        # urllib 异步封装、表单构造、错误映射

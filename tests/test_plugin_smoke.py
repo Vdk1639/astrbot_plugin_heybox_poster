@@ -74,7 +74,7 @@ def _install_astrbot_stubs() -> None:
 _install_astrbot_stubs()
 sys.path.insert(0, str(ROOT.parent))
 
-from astrbot_plugin_xhh_poster.main import XhhPosterPlugin  # noqa: E402
+from astrbot_plugin_heybox_poster.main import XhhPosterPlugin  # noqa: E402
 
 
 class FakeClient:
