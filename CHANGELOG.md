@@ -2,6 +2,19 @@
 
 本文件记录插件各版本的功能变更，便于使用者判断是否需要升级。
 
+## [v0.3.0] - 2026-10-29
+
+### 新增
+
+- 命中限流后本地冷却，冷却期内直接拒绝并提示剩余时间
+- outbox `purge` 回收机制，启动时清理过期 `failed` 记录
+- 最小 CI 工作流（Python 3.12 + unittest）
+- 配置项：`rate_limit_cooldown_seconds`、`outbox_purge_days`
+
+### 文档
+
+- README 新增致谢（DeepSeek / DeepSeek Harness / Codex），并补齐新指令与工具说明
+
 ## [v0.2.2] - 2026-10-29
 
 ### 修复

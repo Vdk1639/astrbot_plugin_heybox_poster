@@ -67,6 +67,8 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | `request_timeout` | int | 20 | 单次请求超时（秒） |
 | `outbox_path` | string | 空 | 发帖 outbox 数据库路径；留空则用 AstrBot 插件数据目录 |
 | `outbox_dedup_seconds` | int | 600 | 相同内容去重窗口（秒） |
+| `rate_limit_cooldown_seconds` | int | 600 | 命中限流后的本地冷却（秒） |
+| `outbox_purge_days` | int | 7 | 启动时清理多少天前的 failed 记录 |
 
 ## 使用
 
@@ -77,6 +79,7 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | `xhh_account_status()` | 查登录态、昵称、heybox_id |
 | `xhh_search_topics(keyword)` | 搜社区/话题，拿 `topic_id` |
 | `xhh_publish_post(title, text, topic, topic_ids, mode, draft)` | 发帖 / 存草稿 |
+| `xhh_my_posts(limit)` | 只读查询当前账号最近的帖子列表 |
 
 给模型的提示词里建议加一句：
 
@@ -88,6 +91,8 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 /xhh状态
 /xhh话题 Steam
 /xhh发帖 标题|正文|Steam
+/xhh删除 <link_id>
+/xhh我的帖子
 ```
 
 ## 上游与协议
@@ -109,6 +114,10 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 - xiaoheihe-cli 为 MIT，与本项目 MIT 兼容；其版权与许可声明已完整保留在 `THIRD_PARTY_NOTICES.md`。
 - 56dz/xiaoheihe-api 为 GPL-3.0。本项目**没有复制其源代码**，仅在 `tests/` 中使用 6 组输入/输出签名样本作回归校验；这类抓包数据不构成 GPL 代码的衍生作品，因此不影响本项目按 MIT 发布。
 - 如需完全规避该引用：删除 `tests/test_core.py` 中的 `SAMPLES` 常量与 `test_hkey_matches_captured_samples` 用例（或替换为你自己抓取的样本）即可，其余测试不依赖它。
+
+## 致谢
+
+本项目由 [DeepSeek](https://www.deepseek.com/) 协助开发，并在 DeepSeek Harness 与 Codex 的支持下完成。
 
 ## 许可
 

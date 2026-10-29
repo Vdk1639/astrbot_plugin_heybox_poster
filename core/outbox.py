@@ -123,6 +123,29 @@ class Outbox:
         ).fetchall()
         return [str(r[0]) for r in rows]
 
+    def purge(
+        self,
+        status: str | None = None,
+        older_than_days: float | None = None,
+    ) -> int:
+        """按状态 / 时间清理记录，返回删除行数。"""
+        conn = self._get_conn()
+        sql = "DELETE FROM outbox"
+        conds: list[str] = []
+        args: list[Any] = []
+        if status:
+            conds.append("status=?")
+            args.append(status)
+        if older_than_days is not None:
+            cutoff = time.time() - float(older_than_days) * 86400
+            conds.append("updated_at < ?")
+            args.append(cutoff)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        cur = conn.execute(sql, args)
+        conn.commit()
+        return cur.rowcount
+
     def remove_by_link_id(self, link_id: str) -> int:
         """删除与指定 link_id 关联的 outbox 记录，返回删除行数。"""
         conn = self._get_conn()
