@@ -32,7 +32,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.3.0",
+    "0.4.0",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -175,18 +175,55 @@ class XhhPosterPlugin(Star):
     # ------------------------------------------------------------------
     # 权限 / 频控
     # ------------------------------------------------------------------
-    def _is_allowed(self, event: AstrMessageEvent) -> bool:
-        allow = self._c("allowed_users", []) or []
-        if isinstance(allow, str):
-            allow = [x.strip() for x in allow.replace("，", ",").split(",")]
-        allow = [str(x).strip() for x in allow if str(x).strip()]
-        if not allow:
-            return True
+    @staticmethod
+    def _normalize_ids(raw: Any) -> list[str]:
+        """把白名单 / 管理员列表统一成干净的 ID 字符串列表。"""
+        if isinstance(raw, str):
+            raw = raw.replace("，", ",").split(",")
+        if not raw:
+            return []
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    def _allowed_users(self) -> list[str]:
+        return self._normalize_ids(self._c("allowed_users", []))
+
+    def _admin_ids(self) -> list[str]:
+        """读取 AstrBot 全局管理员列表，取不到就返回空列表。"""
         try:
-            sender = str(event.get_sender_id())
+            config = self.context.get_config() if self.context is not None else {}
         except Exception:
-            return False
-        return sender in allow
+            return []
+        if not isinstance(config, dict):
+            return []
+        return self._normalize_ids(config.get("admins_id", []))
+
+    def _is_allowed(self, event: AstrMessageEvent) -> bool:
+        """权限判断：显式白名单优先，否则默认仅管理员可用。"""
+        allowed = self._allowed_users()
+        if allowed:
+            try:
+                sender = str(event.get_sender_id())
+            except Exception:
+                return False
+            return sender in allowed
+
+        # 默认仅管理员：优先官方 is_admin()，其次比对全局 admins_id
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+
+        admins = self._admin_ids()
+        if admins:
+            try:
+                sender = str(event.get_sender_id())
+            except Exception:
+                return False
+            return sender in admins
+
+        # 既没配白名单，也拿不到管理员判定依据：为防锁死回退为允许
+        return True
 
     def _check_cooldown(self, event: AstrMessageEvent) -> str:
         seconds = int(self._c("cooldown_seconds", 60) or 0)

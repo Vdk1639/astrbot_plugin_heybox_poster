@@ -31,12 +31,16 @@ def _install_astrbot_stubs() -> None:
     event_mod = types.ModuleType("astrbot.api.event")
 
     class AstrMessageEvent:
-        def __init__(self, sender: str = "10001", message: str = ""):
+        def __init__(self, sender: str = "10001", message: str = "", role: str | None = None):
             self._sender = sender
             self.message_str = message
+            self.role = role
 
         def get_sender_id(self):
             return self._sender
+
+        def is_admin(self):
+            return self.role == "admin"
 
     class _Filter:
         @staticmethod
@@ -53,7 +57,11 @@ def _install_astrbot_stubs() -> None:
     star_mod = types.ModuleType("astrbot.api.star")
 
     class Context:
-        pass
+        def __init__(self, config=None):
+            self._config = config if config is not None else {}
+
+        def get_config(self):
+            return self._config
 
     class Star:
         def __init__(self, context=None):
@@ -93,10 +101,10 @@ class FakeClient:
 
 
 class PluginSmokeTests(unittest.TestCase):
-    def _plugin(self, **config):
+    def _plugin(self, context=None, **config):
         base = {"cookie": "user_pkey=a; x_xhh_tokenid=b", "heybox_id": "1"}
         base.update(config)
-        return XhhPosterPlugin(context=None, config=base)
+        return XhhPosterPlugin(context=context, config=base)
 
     def test_cookie_composition(self):
         plugin = self._plugin(cookie="", user_pkey="p", x_xhh_tokenid="t")
@@ -109,7 +117,21 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertTrue(plugin._is_allowed(AstrMessageEvent("10001")))
         self.assertFalse(plugin._is_allowed(AstrMessageEvent("20002")))
 
-    def test_empty_whitelist_allows_all(self):
+    def test_empty_whitelist_admin_role_allowed(self):
+        plugin = self._plugin()
+        from astrbot.api.event import AstrMessageEvent
+
+        self.assertTrue(plugin._is_allowed(AstrMessageEvent("10001", role="admin")))
+
+    def test_empty_whitelist_non_admin_denied_when_admins_configured(self):
+        from astrbot.api.event import AstrMessageEvent
+        from astrbot.api.star import Context
+
+        plugin = self._plugin(context=Context({"admins_id": ["10001"]}))
+        self.assertTrue(plugin._is_allowed(AstrMessageEvent("10001")))
+        self.assertFalse(plugin._is_allowed(AstrMessageEvent("20002")))
+
+    def test_empty_whitelist_falls_back_open_when_no_admin_source(self):
         plugin = self._plugin()
         from astrbot.api.event import AstrMessageEvent
 
