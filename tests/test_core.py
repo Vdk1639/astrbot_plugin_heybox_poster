@@ -14,6 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.parse
+import uuid
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -21,11 +22,13 @@ sys.path.insert(0, str(ROOT.parent))
 
 from astrbot_plugin_heybox_poster.core.client import (  # noqa: E402
     CaptchaRequired,
+    NetworkError,
     RateLimited,
     XhhClient,
     XhhError,
     build_post_form,
 )
+from astrbot_plugin_heybox_poster.core.outbox import Outbox  # noqa: E402
 from astrbot_plugin_heybox_poster.core.sign import (  # noqa: E402
     hkey,
     normalize_path,
@@ -125,6 +128,20 @@ class PostFormTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def _outbox(self) -> Outbox:
+        path = ROOT / f".outbox_test_{uuid.uuid4().hex}.sqlite3"
+        outbox = Outbox(str(path))
+
+        def cleanup() -> None:
+            outbox.close()
+            for suffix in ("", "-wal", "-shm"):
+                candidate = pathlib.Path(str(path) + suffix)
+                if candidate.exists():
+                    candidate.unlink()
+
+        self.addCleanup(cleanup)
+        return outbox
+
     def _client(self, payload: dict, *, list_payload: dict | None = None) -> tuple[XhhClient, list]:
         client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
         captured: list = []
@@ -234,6 +251,38 @@ class ClientTests(unittest.TestCase):
             asyncio.run(client._reconcile_link_id("标题", set(), now)),
             "",
         )
+
+    def test_publish_outbox_dedup_skips_second_post(self):
+        outbox = self._outbox()
+        client, captured = self._client(
+            {"status": "ok", "result": {"link_id": "999"}},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
+        client.outbox = outbox
+        first = asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
+        self.assertEqual(first["link_id"], "999")
+
+        posts_before = len([r for r in captured if r.get_method() == "POST"])
+        second = asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
+        posts_after = len([r for r in captured if r.get_method() == "POST"])
+
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(second["link_id"], "999")
+        self.assertEqual(posts_after, posts_before)
+
+    def test_publish_network_error_marks_unknown(self):
+        outbox = self._outbox()
+        client, _ = self._client(
+            {},
+            list_payload={"status": "ok", "result": {"post_links": []}},
+        )
+        client.outbox = outbox
+        with mock.patch(
+            "urllib.request.urlopen", side_effect=urllib.error.URLError("boom")
+        ):
+            with self.assertRaises(NetworkError):
+                asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
+        self.assertEqual(len(outbox.unknown_rows()), 1)
 
 
 if __name__ == "__main__":

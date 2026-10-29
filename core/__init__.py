@@ -2,15 +2,19 @@
 
 from .client import (
     CaptchaRequired,
+    NetworkError,
     RateLimited,
     XhhClient,
     XhhError,
     build_post_form,
 )
+from .outbox import Outbox
 from .sign import hkey, signed_params, workshop_rnd
 
 __all__ = [
     "CaptchaRequired",
+    "NetworkError",
+    "Outbox",
     "RateLimited",
     "XhhClient",
     "XhhError",

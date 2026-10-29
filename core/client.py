@@ -67,6 +67,10 @@ class RateLimited(XhhError):
     """触发发帖限流（错误码 ``10006``），调用方应提示稍后再试，不自动重试。"""
 
 
+class NetworkError(XhhError):
+    """网络连接 / 超时错误，发帖结果未知，需要走 outbox 对账。"""
+
+
 def content_fingerprint(title: str, content: str) -> str:
     """发帖内容的幂等指纹：``标题 + 换行 + 正文`` 的 SHA-1。"""
     material = f"{(title or '').strip()}\n{(content or '').strip()}"
@@ -130,11 +134,13 @@ class XhhClient:
     """一个账号一个实例；发帖是写操作，不自动重试。"""
 
     def __init__(self, cookie: str, heybox_id: str | int = "",
-                 timeout: float = 20.0, base: str = API_BASE):
+                 timeout: float = 20.0, base: str = API_BASE,
+                 outbox: Any = None):
         self.cookie = (cookie or "").strip()
         self.heybox_id = str(heybox_id or "").strip()
         self.timeout = float(timeout)
         self.base = base.rstrip("/")
+        self.outbox = outbox
 
     # ------------------------------------------------------------------
     @property
@@ -185,7 +191,7 @@ class XhhClient:
         except urllib.error.HTTPError as exc:
             code, raw = exc.code, exc.read()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise XhhError(f"请求失败：{type(exc).__name__}: {exc}") from exc
+            raise NetworkError(f"请求失败：{type(exc).__name__}: {exc}") from exc
 
         text = raw.decode("utf-8", "replace")
         try:
@@ -315,19 +321,69 @@ class XhhClient:
                         baseline_ids.add(str(lid))
             except Exception:
                 baseline_ids = set()
+        if self.outbox is not None:
+            dedup = self.outbox.mark_pending(
+                fingerprint,
+                {
+                    "form": form,
+                    "title": title,
+                    "content": content,
+                    "baseline_ids": sorted(baseline_ids),
+                    "posted_at": posted_at,
+                },
+            )
+            if dedup["duplicate"]:
+                return {
+                    "link_id": dedup["link_id"],
+                    "is_draft": draft,
+                    "raw": {},
+                    "fingerprint": fingerprint,
+                    "duplicate": True,
+                }
         path = "/bbs/app/api/link/post"
-        payload = await self.request("POST", path, form=form, write=True)
+        try:
+            payload = await self.request("POST", path, form=form, write=True)
+        except NetworkError:
+            if self.outbox is not None:
+                self.outbox.mark_unknown(fingerprint)
+            raise
         result = self._unwrap(payload, path)
         link_id = str(result.get("link_id") or result.get("linkid") or "")
         if not link_id and not draft:
             # 服务端不回 link_id 时，只在「发帖前基线之外的新条目」里认领。
             link_id = await self._reconcile_link_id(title, baseline_ids, posted_at)
+        if self.outbox is not None:
+            if link_id:
+                self.outbox.mark_sent(fingerprint, link_id)
+            else:
+                self.outbox.mark_unknown(fingerprint)
         return {
             "link_id": link_id,
             "is_draft": draft,
             "raw": result,
             "fingerprint": fingerprint,
+            "duplicate": False,
         }
+
+    async def reconcile_outbox(self) -> int:
+        """把 ``send_unknown`` 的帖子与「我的帖子列表」对账，命中即认领。"""
+        if self.outbox is None:
+            return 0
+        claimed = 0
+        for fingerprint, payload_json in self.outbox.unknown_rows():
+            try:
+                meta = json.loads(payload_json)
+            except Exception:
+                continue
+            link_id = await self._reconcile_link_id(
+                str(meta.get("title") or ""),
+                set(meta.get("baseline_ids") or []),
+                float(meta.get("posted_at") or 0),
+            )
+            if link_id:
+                self.outbox.mark_sent(fingerprint, link_id)
+                claimed += 1
+        return claimed
 
     async def _my_recent_links(self, limit: int = 20) -> list[dict]:
         """当前账号最近的帖子条目，供发帖后对账使用。"""

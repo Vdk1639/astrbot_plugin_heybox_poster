@@ -59,5 +59,15 @@
     "description": "单次请求超时（秒）",
     "type": "int",
     "default": 20
+  },
+  "outbox_path": {
+    "description": "发帖 outbox 数据库路径；留空则使用插件目录下的 outbox.sqlite3",
+    "type": "string",
+    "default": ""
+  },
+  "outbox_dedup_seconds": {
+    "description": "相同内容去重窗口（秒），窗口内已发送成功的相同内容会直接拒绝重发",
+    "type": "int",
+    "default": 600
   }
 }
