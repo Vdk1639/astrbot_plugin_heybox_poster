@@ -84,6 +84,26 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 /xhh发帖 标题|正文|Steam
 ```
 
+## 上游与协议
+
+本项目以 [MIT License](LICENSE) 发布。实现过程中参考了以下公开项目，**未整段复制其源代码**：
+
+| 项目 | 协议 | 用途 |
+|---|---|---|
+| [AaronZ345/xiaoheihe-cli](https://github.com/AaronZ345/xiaoheihe-cli) | MIT（© 2025 Li Fangyu） | `hkey` 签名变换、Workshop `_rnd` 公式、发帖表单字段、话题搜索接口 |
+| [56dz/xiaoheihe-api](https://github.com/56dz/xiaoheihe-api) | GPL-3.0 | `hkey` 算法说明；`tests/` 中 6 组真实抓包签名向量（仅测试数据） |
+| [ylty1516/xiaoheihe-agent](https://github.com/ylty1516/xiaoheihe-agent) | MIT（`pyproject.toml` 声明，仓库未附 LICENSE 文件） | 长文必填字段与发帖踩坑记录 |
+
+另评估但未采用代码：[wsmxd/XiaoheiheMcpServer](https://github.com/wsmxd/XiaoheiheMcpServer)（MIT，Playwright 方案）。
+
+第三方许可原文与引用范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+### 协议兼容性说明
+
+- xiaoheihe-cli 为 MIT，与本项目 MIT 兼容；其版权与许可声明已完整保留在 `THIRD_PARTY_NOTICES.md`。
+- 56dz/xiaoheihe-api 为 GPL-3.0。本项目**没有复制其源代码**，仅在 `tests/` 中使用 6 组输入/输出签名样本作回归校验；这类抓包数据不构成 GPL 代码的衍生作品，因此不影响本项目按 MIT 发布。
+- 如需完全规避该引用：删除 `tests/test_core.py` 中的 `SAMPLES` 常量与 `test_hkey_matches_captured_samples` 用例（或替换为你自己抓取的样本）即可，其余测试不依赖它。
+
 ## 许可
 
-[MIT License](LICENSE)。本项目由 DeepSeek Harness 与 Codex 协助开发。
+本项目以 [MIT License](LICENSE) 发布。第三方组件与参考项目见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
