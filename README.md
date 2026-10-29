@@ -88,7 +88,7 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 
 ## 上游与协议
 
-本项目以 [MIT License](LICENSE) 发布。实现过程中参考了以下公开项目，**未整段复制其源代码**：
+本项目以 [MIT License](LICENSE) 发布。实现过程中参考了以下公开项目：
 
 | 项目 | 协议 | 用途 |
 |---|---|---|
