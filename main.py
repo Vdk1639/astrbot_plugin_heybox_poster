@@ -32,7 +32,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.2.0",
+    "0.2.1",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):

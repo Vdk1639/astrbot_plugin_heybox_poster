@@ -96,6 +96,15 @@ class Outbox:
         )
         conn.commit()
 
+    def mark_failed(self, fingerprint: str) -> None:
+        """明确失败（服务端已拒绝、未创建）时标记，避免残留 pending。"""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE outbox SET status='failed', updated_at=? WHERE fingerprint=?",
+            (time.time(), fingerprint),
+        )
+        conn.commit()
+
     def unknown_rows(self) -> list[tuple[str, str]]:
         """返回所有 ``send_unknown`` 的 ``(fingerprint, payload_json)``。"""
         conn = self._get_conn()
@@ -104,6 +113,15 @@ class Outbox:
             "WHERE status='send_unknown' ORDER BY created_at ASC"
         ).fetchall()
         return [(str(r[0]), str(r[1])) for r in rows]
+
+    def pending_rows(self) -> list[str]:
+        """返回所有 ``pending`` 状态的 fingerprint。"""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT fingerprint FROM outbox "
+            "WHERE status='pending' ORDER BY created_at ASC"
+        ).fetchall()
+        return [str(r[0]) for r in rows]
 
     def remove_by_link_id(self, link_id: str) -> int:
         """删除与指定 link_id 关联的 outbox 记录，返回删除行数。"""
