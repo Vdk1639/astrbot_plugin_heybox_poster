@@ -99,11 +99,40 @@ class XhhPosterPlugin(Star):
     def _get_outbox(self) -> Outbox:
         if self._outbox is None:
             path = str(self._c("outbox_path", "") or "").strip()
-            if not path:
-                path = str(Path(__file__).resolve().parent / "outbox.sqlite3")
+            target = Path(path) if path else self._default_outbox_path()
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            # 旧版本把 outbox 落在插件目录，迁移到新数据目录。
+            legacy = Path(__file__).resolve().parent / "outbox.sqlite3"
+            if target != legacy and legacy.exists() and not target.exists():
+                for suffix in ("", "-wal", "-shm"):
+                    src = Path(str(legacy) + suffix)
+                    dst = Path(str(target) + suffix)
+                    if src.exists():
+                        try:
+                            src.replace(dst)
+                        except Exception:
+                            pass
             dedup = int(self._c("outbox_dedup_seconds", 600) or 600)
-            self._outbox = Outbox(path, dedup_seconds=dedup)
+            self._outbox = Outbox(str(target), dedup_seconds=dedup)
         return self._outbox
+
+    def _default_outbox_path(self) -> Path:
+        """outbox 默认落在 AstrBot 插件数据目录，避免升级覆盖插件目录。"""
+        try:
+            from astrbot.api.star import StarTools
+
+            return Path(StarTools.get_data_dir()) / "outbox.sqlite3"
+        except Exception:
+            pass
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "outbox.sqlite3"
+        except Exception:
+            return Path(__file__).resolve().parent / "outbox.sqlite3"
 
     async def terminate(self) -> None:
         if self._client is not None:

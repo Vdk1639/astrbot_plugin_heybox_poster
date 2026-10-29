@@ -135,6 +135,10 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertIn("登录态", plugin._friendly_error(XhhError("登录失败", status="login")))
         self.assertIn("参数错误", plugin._friendly_error(ValueError("标题不能为空")))
 
+    def test_default_outbox_path_falls_back(self):
+        plugin = self._plugin()
+        self.assertEqual(plugin._default_outbox_path().name, "outbox.sqlite3")
+
     def test_resolve_topics_by_name(self):
         plugin = self._plugin()
         plugin._get_client = lambda: FakeClient()
