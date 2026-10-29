@@ -58,9 +58,11 @@ class Outbox:
         conn = self._get_conn()
         now = time.time()
         row = conn.execute(
-            "SELECT status, link_id, created_at FROM outbox WHERE fingerprint=?",
+            "SELECT status, link_id, updated_at FROM outbox WHERE fingerprint=?",
             (fingerprint,),
         ).fetchone()
+        # 以 updated_at 为基准：mark_sent 会刷新它，避免窗口过期后
+        # created_at 停留不动导致同内容可无限重发。
         if row and row[0] == "sent" and (now - row[2]) < self.dedup_seconds:
             return {"duplicate": True, "link_id": row[1]}
         conn.execute(
