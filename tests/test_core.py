@@ -248,6 +248,23 @@ class ClientTests(unittest.TestCase):
         topics = asyncio.run(client.search_topics("小黑盒", limit=3))
         self.assertEqual(len(topics), 3)
 
+    def test_list_my_posts_normalizes(self):
+        client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
+
+        async def recent(limit=20):
+            return [
+                {"linkid": 10, "title": "甲"},
+                {"link_id": "20", "title": "乙"},
+                {"title": "无 id"},
+            ]
+
+        client._my_recent_links = recent
+        posts = asyncio.run(client.list_my_posts())
+        self.assertEqual(
+            posts,
+            [{"link_id": "10", "title": "甲"}, {"link_id": "20", "title": "乙"}],
+        )
+
     def test_reconcile_claims_only_new_items(self):
         client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
         now = time.time()

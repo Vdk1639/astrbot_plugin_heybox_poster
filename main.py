@@ -351,6 +351,20 @@ class XhhPosterPlugin(Star):
         except Exception as exc:
             yield event.plain_result(self._friendly_error(exc))
 
+    @filter.command("xhh我的帖子")
+    async def cmd_my_posts(self, event: AstrMessageEvent):
+        """只读查看我的帖子列表。"""
+        try:
+            posts = await self._get_client().list_my_posts(limit=20)
+        except Exception as exc:
+            yield event.plain_result(f"查询失败：{exc}")
+            return
+        if not posts:
+            yield event.plain_result("当前账号没有查到帖子。")
+            return
+        lines = "\n".join(f"- link_id={p['link_id']}  {p['title']}" for p in posts)
+        yield event.plain_result("我的帖子：\n" + lines)
+
     # ------------------------------------------------------------------
     # LLM 函数工具
     # ------------------------------------------------------------------
@@ -381,6 +395,21 @@ class XhhPosterPlugin(Star):
         return "候选话题：\n" + "\n".join(
             f"- {t['name']}（topic_id={t['topic_id']}）" for t in topics[:10]
         )
+
+    @filter.llm_tool(name="xhh_my_posts")
+    async def tool_my_posts(self, event: AstrMessageEvent, limit: int = 10) -> str:
+        """只读查询当前账号最近发布的帖子列表，运维自查用。
+
+        Args:
+            limit(int): 最多返回条数，默认 10
+        """
+        try:
+            posts = await self._get_client().list_my_posts(limit=limit)
+        except Exception as exc:
+            return f"查询失败：{exc}"
+        if not posts:
+            return "当前账号没有查到帖子。"
+        return "\n".join(f"- link_id={p['link_id']}  {p['title']}" for p in posts)
 
     @filter.llm_tool(name="xhh_publish_post")
     async def tool_publish(

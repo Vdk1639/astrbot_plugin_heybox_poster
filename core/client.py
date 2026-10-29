@@ -445,6 +445,20 @@ class XhhClient:
             return lid
         return ""
 
+    async def list_my_posts(self, limit: int = 20) -> list[dict]:
+        """只读查询我的帖子列表，返回 ``[{link_id, title}]``。"""
+        items = await self._my_recent_links(limit)
+        posts: list[dict] = []
+        for item in items:
+            lid = item.get("linkid") or item.get("link_id")
+            if not lid:
+                continue
+            posts.append({
+                "link_id": str(lid),
+                "title": str(item.get("title") or "").strip(),
+            })
+        return posts
+
     async def comment(self, link_id: int | str, text: str, *,
                       reply_id: int | str = "-1", root_id: int | str = "-1") -> dict:
         """发评论 / 回复（顶层评论 reply_id 与 root_id 都传 ``-1``）。"""
