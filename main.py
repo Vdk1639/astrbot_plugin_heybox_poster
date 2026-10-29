@@ -225,6 +225,15 @@ class XhhPosterPlugin(Star):
             return f"参数错误：{exc}"
         return f"发帖失败：{type(exc).__name__}: {exc}"
 
+    def _log_error(self, exc: Exception) -> None:
+        """把原始错误码/msg 落日志，方便线上出问题时回溯。"""
+        if isinstance(exc, XhhError):
+            logger.warning(
+                f"[{PLUGIN_NAME}] 发帖失败：{type(exc).__name__} "
+                f"status={getattr(exc, 'status', None)} "
+                f"payload={getattr(exc, 'payload', None)}"
+            )
+
     # ------------------------------------------------------------------
     # 手动指令
     # ------------------------------------------------------------------
@@ -293,6 +302,7 @@ class XhhPosterPlugin(Star):
                         f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
                     )
             except Exception as exc:
+                self._log_error(exc)
                 yield event.plain_result(self._friendly_error(exc))
 
     @filter.command("xhh话题")
@@ -423,6 +433,7 @@ class XhhPosterPlugin(Star):
                     view_limit=view_limit,
                 )
             except Exception as exc:
+                self._log_error(exc)
                 return self._friendly_error(exc)
 
         if result.get("duplicate"):
