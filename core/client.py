@@ -387,6 +387,13 @@ class XhhClient:
                 claimed += 1
         return claimed
 
+    async def delete_link(self, link_id: int | str) -> dict:
+        """删除帖子：``POST /bbs/app/link/delete``，表单 ``link_id=<id>``。"""
+        path = "/bbs/app/link/delete"
+        form = {"link_id": str(link_id)}
+        payload = await self.request("POST", path, form=form, write=True)
+        return self._unwrap(payload, path)
+
     async def _my_recent_links(self, limit: int = 20) -> list[dict]:
         """当前账号最近的帖子条目，供发帖后对账使用。"""
         if not self.heybox_id:

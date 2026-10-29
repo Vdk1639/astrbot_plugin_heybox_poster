@@ -71,6 +71,15 @@ class OutboxTests(unittest.TestCase):
             self.assertTrue(dup["duplicate"])
             self.assertEqual(dup["link_id"], "2")
 
+    def test_remove_by_link_id(self):
+        box = self._outbox()
+        box.mark_pending("fp1", {"title": "a"})
+        box.mark_sent("fp1", "111")
+        box.mark_pending("fp2", {"title": "b"})
+        box.mark_sent("fp2", "222")
+        self.assertEqual(box.remove_by_link_id("111"), 1)
+        self.assertEqual(box.remove_by_link_id("999"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

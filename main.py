@@ -317,6 +317,30 @@ class XhhPosterPlugin(Star):
         lines = [f"{t['topic_id']}  {t['name']}" for t in topics[:10]]
         yield event.plain_result("话题 ID / 名称：\n" + "\n".join(lines))
 
+    @filter.command("xhh删除")
+    async def cmd_delete(self, event: AstrMessageEvent):
+        """删除帖子：/xhh删除 <link_id>（仅白名单用户）。"""
+        if not self._is_allowed(event):
+            yield event.plain_result("你没有删除权限。")
+            return
+        raw = event.message_str.strip()
+        for prefix in ("/xhh删除", "xhh删除"):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):].strip()
+                break
+        link_id = raw.strip()
+        if not link_id:
+            yield event.plain_result("用法：/xhh删除 <link_id>")
+            return
+        try:
+            result = await self._get_client().delete_link(link_id)
+            removed = self._get_outbox().remove_by_link_id(link_id)
+            yield event.plain_result(
+                f"已删除 link_id={link_id}（outbox 清理 {removed} 条记录），result={result}"
+            )
+        except Exception as exc:
+            yield event.plain_result(self._friendly_error(exc))
+
     # ------------------------------------------------------------------
     # LLM 函数工具
     # ------------------------------------------------------------------

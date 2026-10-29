@@ -104,3 +104,13 @@ class Outbox:
             "WHERE status='send_unknown' ORDER BY created_at ASC"
         ).fetchall()
         return [(str(r[0]), str(r[1])) for r in rows]
+
+    def remove_by_link_id(self, link_id: str) -> int:
+        """删除与指定 link_id 关联的 outbox 记录，返回删除行数。"""
+        conn = self._get_conn()
+        cur = conn.execute(
+            "DELETE FROM outbox WHERE link_id=?",
+            (str(link_id or ""),),
+        )
+        conn.commit()
+        return cur.rowcount

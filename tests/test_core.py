@@ -189,6 +189,14 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(body["link_id"], "195173343")
         self.assertEqual(body["reply_id"], "-1")
 
+    def test_delete_link_uses_write_signature(self):
+        client, captured = self._client({"status": "ok", "result": {}})
+        asyncio.run(client.delete_link("195381907"))
+        query = _query(captured[0].full_url)
+        self.assertTrue(query["_rnd"].startswith("15:"))
+        body = dict(urllib.parse.parse_qsl(captured[0].data.decode("utf-8")))
+        self.assertEqual(body["link_id"], "195381907")
+
     def test_show_captcha_raises(self):
         client, _ = self._client(
             {"status": "show_captcha", "result": {}, "msg": ""},
