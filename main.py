@@ -42,6 +42,14 @@ class XhhPosterPlugin(Star):
             value = default
         return default if value is None else value
 
+    def _view_limit(self) -> int:
+        """可见范围：1 公开、2 粉丝可见、3 仅自己可见。"""
+        try:
+            value = int(self._c("view_limit", 2))
+        except (TypeError, ValueError):
+            value = 2
+        return value if value in (1, 2, 3) else 2
+
     def _cookie(self) -> str:
         """优先用完整 cookie；否则用 pkey / tokenid 拼。"""
         raw = str(self._c("cookie", "") or "").strip()
@@ -174,12 +182,19 @@ class XhhPosterPlugin(Star):
 
         try:
             topic_ids = await self._resolve_topics(topic)
+            view_limit = self._view_limit()
             if self._c("dry_run", False):
-                form = build_post_form(title, text, topic_ids=topic_ids)
+                form = build_post_form(
+                    title, text, topic_ids=topic_ids, view_limit=view_limit
+                )
                 yield event.plain_result(f"[dry-run] 将提交：{form}")
                 return
             result = await self._get_client().publish(
-                title, text, mode="dynamic", topic_ids=topic_ids
+                title,
+                text,
+                mode="dynamic",
+                topic_ids=topic_ids,
+                view_limit=view_limit,
             )
             yield event.plain_result(
                 f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
@@ -272,13 +287,24 @@ class XhhPosterPlugin(Star):
             return wait
         try:
             ids = await self._resolve_topics(topic, topic_ids)
+            view_limit = self._view_limit()
             if self._c("dry_run", False):
                 form = build_post_form(
-                    title, text, mode=mode, topic_ids=ids, draft=draft
+                    title,
+                    text,
+                    mode=mode,
+                    topic_ids=ids,
+                    draft=draft,
+                    view_limit=view_limit,
                 )
                 return f"[dry-run] 未真正提交，表单如下：{form}"
             result = await self._get_client().publish(
-                title, text, mode=mode, topic_ids=ids, draft=draft
+                title,
+                text,
+                mode=mode,
+                topic_ids=ids,
+                draft=draft,
+                view_limit=view_limit,
             )
         except CaptchaRequired as exc:
             return f"被风控验证码拦截（{exc}），请更新 cookie 里的 x_xhh_tokenid 后重试。"

@@ -69,11 +69,13 @@ def build_post_form(
     topic_ids: list[str] | tuple[str, ...] = (),
     draft: bool = False,
     desc: str = "",
+    view_limit: int = 1,
 ) -> dict[str, str]:
     """构造 ``POST /bbs/app/api/link/post`` 的表单。
 
     :param mode: ``dynamic``（动态，纯文本）或 ``article``（长文，支持 HTML）。
     :param topic_ids: 社区/话题 ID，**必填**，服务端缺了会报“请添加分区”。
+    :param view_limit: 可见范围，``1`` 公开、``2`` 粉丝可见、``3`` 仅自己可见。
     """
     title = (title or "").strip()
     content = (content or "").strip()
@@ -85,6 +87,8 @@ def build_post_form(
         raise ValueError(f"标题过长（{len(title)} 字，上限 100）")
     if not topic_ids:
         raise ValueError("缺少话题/社区 ID（topic_ids）")
+    if int(view_limit) not in (1, 2, 3):
+        raise ValueError("可见范围只能是 1 公开、2 粉丝可见、3 仅自己可见")
 
     is_article = mode == "article"
     blocks = [{"type": "html" if is_article else "text", "text": content}]
@@ -98,7 +102,7 @@ def build_post_form(
         "topic_ids": ",".join(str(t) for t in topic_ids),
         "hashtags": "[]",
         "original": "1",
-        "view_limit": "1",
+        "view_limit": str(int(view_limit)),
     }
     if is_article:
         # 长文必需的四件套，缺了会回“错误的帖子类型”
@@ -244,7 +248,14 @@ class XhhClient:
         )
         result = self._unwrap(payload, path)
         topics: list[dict] = []
-        for item in result.get("topics") or result.get("list") or []:
+        # 线上返回的是 search_result，兼容旧字段名。
+        items = (
+            result.get("search_result")
+            or result.get("topics")
+            or result.get("list")
+            or []
+        )
+        for item in items:
             if not isinstance(item, dict):
                 continue
             tid = item.get("topic_id") or item.get("id")
@@ -262,16 +273,51 @@ class XhhClient:
         topic_ids: list[str] | tuple[str, ...] = (),
         draft: bool = False,
         desc: str = "",
+        view_limit: int = 1,
     ) -> dict:
         """发帖 / 存草稿，返回 ``{link_id, is_draft, raw}``。"""
         form = build_post_form(
-            title, content, mode=mode, topic_ids=topic_ids, draft=draft, desc=desc
+            title,
+            content,
+            mode=mode,
+            topic_ids=topic_ids,
+            draft=draft,
+            desc=desc,
+            view_limit=view_limit,
         )
         path = "/bbs/app/api/link/post"
         payload = await self.request("POST", path, form=form, write=True)
         result = self._unwrap(payload, path)
         link_id = str(result.get("link_id") or result.get("linkid") or "")
+        if not link_id and not draft:
+            # 线上发帖成功后 result 可能是空对象，回查最新帖子兜底。
+            link_id = await self._find_recent_link_id(title)
         return {"link_id": link_id, "is_draft": draft, "raw": result}
+
+    async def _find_recent_link_id(self, title: str, limit: int = 5) -> str:
+        """按标题回查自己最近的帖子，用于服务端不回 link_id 的情况。"""
+        target = (title or "").strip()
+        if not target or not self.heybox_id:
+            return ""
+        path = "/bbs/app/profile/user/link/list_v2"
+        try:
+            payload = await self.request(
+                "GET",
+                path,
+                params={"userid": self.heybox_id, "offset": 0, "limit": limit},
+            )
+            result = self._unwrap(payload, path)
+        except Exception:
+            return ""
+        for item in result.get("post_links") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("title") or "").strip() != target:
+                continue
+            link_id = item.get("linkid") or item.get("link_id")
+            if link_id:
+                return str(link_id)
+        return ""
 
     async def comment(self, link_id: int | str, text: str, *,
                       reply_id: int | str = "-1", root_id: int | str = "-1") -> dict:
