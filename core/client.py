@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -59,6 +61,20 @@ class XhhError(Exception):
 
 class CaptchaRequired(XhhError):
     """命中风控验证码：``x_xhh_tokenid`` 缺失或过期。"""
+
+
+class RateLimited(XhhError):
+    """触发发帖限流（错误码 ``10006``），调用方应提示稍后再试，不自动重试。"""
+
+
+class NetworkError(XhhError):
+    """网络连接 / 超时错误，发帖结果未知，需要走 outbox 对账。"""
+
+
+def content_fingerprint(title: str, content: str) -> str:
+    """发帖内容的幂等指纹：``标题 + 换行 + 正文`` 的 SHA-1。"""
+    material = f"{(title or '').strip()}\n{(content or '').strip()}"
+    return hashlib.sha1(material.encode("utf-8")).hexdigest()
 
 
 def build_post_form(
@@ -118,11 +134,13 @@ class XhhClient:
     """一个账号一个实例；发帖是写操作，不自动重试。"""
 
     def __init__(self, cookie: str, heybox_id: str | int = "",
-                 timeout: float = 20.0, base: str = API_BASE):
+                 timeout: float = 20.0, base: str = API_BASE,
+                 outbox: Any = None):
         self.cookie = (cookie or "").strip()
         self.heybox_id = str(heybox_id or "").strip()
         self.timeout = float(timeout)
         self.base = base.rstrip("/")
+        self.outbox = outbox
 
     # ------------------------------------------------------------------
     @property
@@ -173,7 +191,7 @@ class XhhClient:
         except urllib.error.HTTPError as exc:
             code, raw = exc.code, exc.read()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise XhhError(f"请求失败：{type(exc).__name__}: {exc}") from exc
+            raise NetworkError(f"请求失败：{type(exc).__name__}: {exc}") from exc
 
         text = raw.decode("utf-8", "replace")
         try:
@@ -211,10 +229,17 @@ class XhhClient:
                 "触发风控验证码：cookie 里的 x_xhh_tokenid 缺失或已失效",
                 status=status, path=path,
             )
+        msg = str(payload.get("msg") or "")
+        code = payload.get("code") or payload.get("error_code")
+        if "10006" in msg or code in (10006, "10006"):
+            raise RateLimited(
+                "发帖频率过快，请稍后再试",
+                status=status, path=path, payload=payload,
+            )
         if status in _ERROR_STATUS:
-            msg = payload.get("msg") or f"status={status}"
             hint = "（登录态失效，请重新提供 cookie）" if status in {"login", "relogin", "expired"} else ""
-            raise XhhError(msg + hint, status=status, path=path, payload=payload)
+            raise XhhError((msg or f"status={status}") + hint,
+                           status=status, path=path, payload=payload)
         if status != "ok":
             raise XhhError(payload.get("msg") or f"status={status}",
                            status=status, path=path, payload=payload)
@@ -262,6 +287,8 @@ class XhhClient:
             name = item.get("name") or item.get("topic_name") or ""
             if tid:
                 topics.append({"topic_id": str(tid), "name": str(name)})
+        if limit > 0:
+            topics = topics[:limit]
         return topics
 
     async def publish(
@@ -285,38 +312,130 @@ class XhhClient:
             desc=desc,
             view_limit=view_limit,
         )
+        fingerprint = content_fingerprint(title, content)
+        posted_at = time.time()
+        baseline_ids: set[str] = set()
+        if not draft:
+            try:
+                for item in await self._my_recent_links(20):
+                    lid = item.get("linkid") or item.get("link_id")
+                    if lid:
+                        baseline_ids.add(str(lid))
+            except Exception:
+                baseline_ids = set()
+        if self.outbox is not None:
+            dedup = self.outbox.mark_pending(
+                fingerprint,
+                {
+                    "form": form,
+                    "title": title,
+                    "content": content,
+                    "baseline_ids": sorted(baseline_ids),
+                    "posted_at": posted_at,
+                },
+            )
+            if dedup["duplicate"]:
+                return {
+                    "link_id": dedup["link_id"],
+                    "is_draft": draft,
+                    "raw": {},
+                    "fingerprint": fingerprint,
+                    "duplicate": True,
+                }
         path = "/bbs/app/api/link/post"
-        payload = await self.request("POST", path, form=form, write=True)
+        try:
+            payload = await self.request("POST", path, form=form, write=True)
+        except NetworkError:
+            if self.outbox is not None:
+                self.outbox.mark_unknown(fingerprint)
+            raise
         result = self._unwrap(payload, path)
         link_id = str(result.get("link_id") or result.get("linkid") or "")
         if not link_id and not draft:
-            # 线上发帖成功后 result 可能是空对象，回查最新帖子兜底。
-            link_id = await self._find_recent_link_id(title)
-        return {"link_id": link_id, "is_draft": draft, "raw": result}
+            # 服务端不回 link_id 时，只在「发帖前基线之外的新条目」里认领。
+            link_id = await self._reconcile_link_id(title, baseline_ids, posted_at)
+        if self.outbox is not None:
+            if link_id:
+                self.outbox.mark_sent(fingerprint, link_id)
+            else:
+                self.outbox.mark_unknown(fingerprint)
+        return {
+            "link_id": link_id,
+            "is_draft": draft,
+            "raw": result,
+            "fingerprint": fingerprint,
+            "duplicate": False,
+        }
 
-    async def _find_recent_link_id(self, title: str, limit: int = 5) -> str:
-        """按标题回查自己最近的帖子，用于服务端不回 link_id 的情况。"""
+    async def reconcile_outbox(self) -> int:
+        """把 ``send_unknown`` 的帖子与「我的帖子列表」对账，命中即认领。"""
+        if self.outbox is None:
+            return 0
+        claimed = 0
+        for fingerprint, payload_json in self.outbox.unknown_rows():
+            try:
+                meta = json.loads(payload_json)
+            except Exception:
+                continue
+            link_id = await self._reconcile_link_id(
+                str(meta.get("title") or ""),
+                set(meta.get("baseline_ids") or []),
+                float(meta.get("posted_at") or 0),
+            )
+            if link_id:
+                self.outbox.mark_sent(fingerprint, link_id)
+                claimed += 1
+        return claimed
+
+    async def _my_recent_links(self, limit: int = 20) -> list[dict]:
+        """当前账号最近的帖子条目，供发帖后对账使用。"""
+        if not self.heybox_id:
+            return []
+        path = "/bbs/app/profile/user/link/list_v2"
+        payload = await self.request(
+            "GET",
+            path,
+            params={"userid": self.heybox_id, "offset": 0, "limit": limit},
+        )
+        result = self._unwrap(payload, path)
+        items = result.get("post_links") or []
+        return [item for item in items if isinstance(item, dict)]
+
+    async def _reconcile_link_id(
+        self,
+        title: str,
+        baseline_ids: set[str],
+        posted_at: float,
+        limit: int = 20,
+    ) -> str:
+        """在基线之外的新条目里回查 link_id，并按时间窗口过滤。"""
         target = (title or "").strip()
         if not target or not self.heybox_id:
             return ""
-        path = "/bbs/app/profile/user/link/list_v2"
         try:
-            payload = await self.request(
-                "GET",
-                path,
-                params={"userid": self.heybox_id, "offset": 0, "limit": limit},
-            )
-            result = self._unwrap(payload, path)
+            items = await self._my_recent_links(limit)
         except Exception:
             return ""
-        for item in result.get("post_links") or []:
-            if not isinstance(item, dict):
+        for item in items:
+            lid = item.get("linkid") or item.get("link_id")
+            if not lid:
+                continue
+            lid = str(lid)
+            if lid in baseline_ids:
                 continue
             if str(item.get("title") or "").strip() != target:
                 continue
-            link_id = item.get("linkid") or item.get("link_id")
-            if link_id:
-                return str(link_id)
+            ts = item.get("create_time") or item.get("created_at") or item.get("time")
+            if ts is not None:
+                try:
+                    t = float(ts)
+                    if t > 10_000_000_000:  # 毫秒时间戳
+                        t /= 1000
+                    if t < posted_at - 120:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            return lid
         return ""
 
     async def comment(self, link_id: int | str, text: str, *,
