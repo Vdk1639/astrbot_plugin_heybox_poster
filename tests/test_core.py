@@ -189,6 +189,23 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(body["link_id"], "195173343")
         self.assertEqual(body["reply_id"], "-1")
 
+    def test_delete_link_uses_write_signature(self):
+        client, captured = self._client({"status": "ok", "result": {}})
+        asyncio.run(client.delete_link("195381907"))
+        query = _query(captured[0].full_url)
+        self.assertTrue(query["_rnd"].startswith("15:"))
+        body = dict(urllib.parse.parse_qsl(captured[0].data.decode("utf-8")))
+        self.assertEqual(body["link_id"], "195381907")
+
+    def test_delete_link_cleans_outbox(self):
+        outbox = self._outbox()
+        outbox.mark_pending("fp", {"title": "a"})
+        outbox.mark_sent("fp", "195381907")
+        client, _ = self._client({"status": "ok", "result": {}})
+        client.outbox = outbox
+        asyncio.run(client.delete_link("195381907"))
+        self.assertEqual(outbox.remove_by_link_id("195381907"), 0)
+
     def test_show_captcha_raises(self):
         client, _ = self._client(
             {"status": "show_captcha", "result": {}, "msg": ""},
@@ -239,6 +256,23 @@ class ClientTests(unittest.TestCase):
         client.request = fake_request
         topics = asyncio.run(client.search_topics("小黑盒", limit=3))
         self.assertEqual(len(topics), 3)
+
+    def test_list_my_posts_normalizes(self):
+        client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")
+
+        async def recent(limit=20):
+            return [
+                {"linkid": 10, "title": "甲"},
+                {"link_id": "20", "title": "乙"},
+                {"title": "无 id"},
+            ]
+
+        client._my_recent_links = recent
+        posts = asyncio.run(client.list_my_posts())
+        self.assertEqual(
+            posts,
+            [{"link_id": "10", "title": "甲"}, {"link_id": "20", "title": "乙"}],
+        )
 
     def test_reconcile_claims_only_new_items(self):
         client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")

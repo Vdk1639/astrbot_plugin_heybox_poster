@@ -387,6 +387,16 @@ class XhhClient:
                 claimed += 1
         return claimed
 
+    async def delete_link(self, link_id: int | str) -> dict:
+        """删除帖子：``POST /bbs/app/link/delete``，表单 ``link_id=<id>``。"""
+        path = "/bbs/app/link/delete"
+        form = {"link_id": str(link_id)}
+        payload = await self.request("POST", path, form=form, write=True)
+        result = self._unwrap(payload, path)
+        if self.outbox is not None:
+            self.outbox.remove_by_link_id(str(link_id))
+        return result
+
     async def _my_recent_links(self, limit: int = 20) -> list[dict]:
         """当前账号最近的帖子条目，供发帖后对账使用。"""
         if not self.heybox_id:
@@ -437,6 +447,20 @@ class XhhClient:
                     pass
             return lid
         return ""
+
+    async def list_my_posts(self, limit: int = 20) -> list[dict]:
+        """只读查询我的帖子列表，返回 ``[{link_id, title}]``。"""
+        items = await self._my_recent_links(limit)
+        posts: list[dict] = []
+        for item in items:
+            lid = item.get("linkid") or item.get("link_id")
+            if not lid:
+                continue
+            posts.append({
+                "link_id": str(lid),
+                "title": str(item.get("title") or "").strip(),
+            })
+        return posts
 
     async def comment(self, link_id: int | str, text: str, *,
                       reply_id: int | str = "-1", root_id: int | str = "-1") -> dict:

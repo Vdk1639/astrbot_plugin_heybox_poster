@@ -6,6 +6,7 @@ import pathlib
 import sys
 import unittest
 import uuid
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -50,6 +51,34 @@ class OutboxTests(unittest.TestCase):
         box.mark_unknown("fp1")
         box.mark_sent("fp1", "42")
         self.assertEqual(box.unknown_rows(), [])
+
+    def test_dedup_uses_latest_sent_time(self):
+        import astrbot_plugin_heybox_poster.core.outbox as outbox_mod
+
+        box = self._outbox()
+        clock = {"now": 1000.0}
+        with mock.patch.object(
+            outbox_mod.time, "time", side_effect=lambda: clock["now"]
+        ):
+            self.assertFalse(box.mark_pending("fp", {"title": "a"})["duplicate"])
+            box.mark_sent("fp", "1")
+            # 窗口过期后允许重发
+            clock["now"] = 1000.0 + box.dedup_seconds + 10
+            self.assertFalse(box.mark_pending("fp", {"title": "a"})["duplicate"])
+            box.mark_sent("fp", "2")
+            # 刚发完立刻再登记，应命中去重
+            dup = box.mark_pending("fp", {"title": "a"})
+            self.assertTrue(dup["duplicate"])
+            self.assertEqual(dup["link_id"], "2")
+
+    def test_remove_by_link_id(self):
+        box = self._outbox()
+        box.mark_pending("fp1", {"title": "a"})
+        box.mark_sent("fp1", "111")
+        box.mark_pending("fp2", {"title": "b"})
+        box.mark_sent("fp2", "222")
+        self.assertEqual(box.remove_by_link_id("111"), 1)
+        self.assertEqual(box.remove_by_link_id("999"), 0)
 
 
 if __name__ == "__main__":

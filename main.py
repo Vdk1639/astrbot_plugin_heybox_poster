@@ -32,7 +32,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.1.0",
+    "0.2.0",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -99,11 +99,40 @@ class XhhPosterPlugin(Star):
     def _get_outbox(self) -> Outbox:
         if self._outbox is None:
             path = str(self._c("outbox_path", "") or "").strip()
-            if not path:
-                path = str(Path(__file__).resolve().parent / "outbox.sqlite3")
+            target = Path(path) if path else self._default_outbox_path()
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            # 旧版本把 outbox 落在插件目录，迁移到新数据目录。
+            legacy = Path(__file__).resolve().parent / "outbox.sqlite3"
+            if target != legacy and legacy.exists() and not target.exists():
+                for suffix in ("", "-wal", "-shm"):
+                    src = Path(str(legacy) + suffix)
+                    dst = Path(str(target) + suffix)
+                    if src.exists():
+                        try:
+                            src.replace(dst)
+                        except Exception:
+                            pass
             dedup = int(self._c("outbox_dedup_seconds", 600) or 600)
-            self._outbox = Outbox(path, dedup_seconds=dedup)
+            self._outbox = Outbox(str(target), dedup_seconds=dedup)
         return self._outbox
+
+    def _default_outbox_path(self) -> Path:
+        """outbox 默认落在 AstrBot 插件数据目录，避免升级覆盖插件目录。"""
+        try:
+            from astrbot.api.star import StarTools
+
+            return Path(StarTools.get_data_dir()) / "outbox.sqlite3"
+        except Exception:
+            pass
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+            return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "outbox.sqlite3"
+        except Exception:
+            return Path(__file__).resolve().parent / "outbox.sqlite3"
 
     async def terminate(self) -> None:
         if self._client is not None:
@@ -196,6 +225,15 @@ class XhhPosterPlugin(Star):
             return f"参数错误：{exc}"
         return f"发帖失败：{type(exc).__name__}: {exc}"
 
+    def _log_error(self, exc: Exception) -> None:
+        """把原始错误码/msg 落日志，方便线上出问题时回溯。"""
+        if isinstance(exc, XhhError):
+            logger.warning(
+                f"[{PLUGIN_NAME}] 发帖失败：{type(exc).__name__} "
+                f"status={getattr(exc, 'status', None)} "
+                f"payload={getattr(exc, 'payload', None)}"
+            )
+
     # ------------------------------------------------------------------
     # 手动指令
     # ------------------------------------------------------------------
@@ -264,6 +302,7 @@ class XhhPosterPlugin(Star):
                         f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
                     )
             except Exception as exc:
+                self._log_error(exc)
                 yield event.plain_result(self._friendly_error(exc))
 
     @filter.command("xhh话题")
@@ -287,6 +326,43 @@ class XhhPosterPlugin(Star):
             return
         lines = [f"{t['topic_id']}  {t['name']}" for t in topics[:10]]
         yield event.plain_result("话题 ID / 名称：\n" + "\n".join(lines))
+
+    @filter.command("xhh删除")
+    async def cmd_delete(self, event: AstrMessageEvent):
+        """删除帖子：/xhh删除 <link_id>（仅白名单用户）。"""
+        if not self._is_allowed(event):
+            yield event.plain_result("你没有删除权限。")
+            return
+        raw = event.message_str.strip()
+        for prefix in ("/xhh删除", "xhh删除"):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):].strip()
+                break
+        link_id = raw.strip()
+        if not link_id:
+            yield event.plain_result("用法：/xhh删除 <link_id>")
+            return
+        try:
+            result = await self._get_client().delete_link(link_id)
+            yield event.plain_result(
+                f"已删除 link_id={link_id}，result={result}"
+            )
+        except Exception as exc:
+            yield event.plain_result(self._friendly_error(exc))
+
+    @filter.command("xhh我的帖子")
+    async def cmd_my_posts(self, event: AstrMessageEvent):
+        """只读查看我的帖子列表。"""
+        try:
+            posts = await self._get_client().list_my_posts(limit=20)
+        except Exception as exc:
+            yield event.plain_result(f"查询失败：{exc}")
+            return
+        if not posts:
+            yield event.plain_result("当前账号没有查到帖子。")
+            return
+        lines = "\n".join(f"- link_id={p['link_id']}  {p['title']}" for p in posts)
+        yield event.plain_result("我的帖子：\n" + lines)
 
     # ------------------------------------------------------------------
     # LLM 函数工具
@@ -318,6 +394,21 @@ class XhhPosterPlugin(Star):
         return "候选话题：\n" + "\n".join(
             f"- {t['name']}（topic_id={t['topic_id']}）" for t in topics[:10]
         )
+
+    @filter.llm_tool(name="xhh_my_posts")
+    async def tool_my_posts(self, event: AstrMessageEvent, limit: int = 10) -> str:
+        """只读查询当前账号最近发布的帖子列表，运维自查用。
+
+        Args:
+            limit(int): 最多返回条数，默认 10
+        """
+        try:
+            posts = await self._get_client().list_my_posts(limit=limit)
+        except Exception as exc:
+            return f"查询失败：{exc}"
+        if not posts:
+            return "当前账号没有查到帖子。"
+        return "\n".join(f"- link_id={p['link_id']}  {p['title']}" for p in posts)
 
     @filter.llm_tool(name="xhh_publish_post")
     async def tool_publish(
@@ -370,6 +461,7 @@ class XhhPosterPlugin(Star):
                     view_limit=view_limit,
                 )
             except Exception as exc:
+                self._log_error(exc)
                 return self._friendly_error(exc)
 
         if result.get("duplicate"):
