@@ -22,7 +22,7 @@ p { margin: 12px 0; line-height: 1.7; overflow-wrap: anywhere; }
 .muted, .note { color: var(--muted); }
 .note { font-size: 13px; }
 .page-header { margin-bottom: 28px; }
-.panels { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); gap: 20px; align-items: start; }
+.panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
 section { min-width: 0; padding: 28px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
 .badge { display: inline-block; margin: 0; padding: 4px 11px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; }
 .badge[data-tone="success"] { color: light-dark(#21613f, #99dfb8); background: light-dark(#e9f5ed, #243f33); }
