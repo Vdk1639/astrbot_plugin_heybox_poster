@@ -33,7 +33,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.directory.mkdir()
         self.addCleanup(self._cleanup_directory)
         self.box = Outbox(":memory:")
-        self.config = Config(cookie="user_pkey=old-p; x_xhh_tokenid=old-t", user_pkey="old-p", x_xhh_tokenid="old-t", heybox_id="1")
+        self.config = Config(cookie="user_pkey=old-p; x_xhh_tokenid=old-t", user_pkey="old-p", x_xhh_tokenid="old-t", heybox_id="1", dry_run=False)
         self.plugin = XhhPosterPlugin(None, self.config)
         self.plugin._get_outbox = lambda: self.box
         self.plugin._default_outbox_path = lambda: self.directory / "outbox.sqlite3"
@@ -310,6 +310,32 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response["account"]["logged_in"])
         self.assertTrue(response["account"]["check_unavailable"])
         self.assertNotIn("secret-value", json.dumps(response))
+
+    async def test_old_account_check_cannot_overwrite_switched_account(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                self.config.update(cookie="user_pkey=old-p; x_xhh_tokenid=old-t", heybox_id="1")
+                started = asyncio.Event()
+                finish = asyncio.Event()
+
+                async def verify(*args):
+                    started.set()
+                    await finish.wait()
+                    if fail:
+                        raise XhhError("old-account-error")
+                    return {"logged_in": True, "nickname": "old", "user_id": "1"}
+
+                with mock.patch.object(self.web, "_verify_account", side_effect=verify):
+                    task = asyncio.create_task(self.web.check())
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    self.plugin._save_login("user_pkey=new-p; x_xhh_tokenid=new-t", {"user_id": "42"})
+                    self.web._account = {"logged_in": True, "nickname": "new"}
+                    finish.set()
+                    response = await asyncio.wait_for(task, timeout=1)
+                self.assertEqual(response["account"]["user_id"], "42")
+                self.assertEqual(response["account"]["nickname"], "new")
+                self.assertTrue(response["account"]["logged_in"])
+                self.assertNotIn("check_unavailable", response["account"])
 
     async def test_json_only_qr_confirmation_saves_real_parser_credentials(self):
         from astrbot_plugin_heybox_poster.core.login import QrLoginClient

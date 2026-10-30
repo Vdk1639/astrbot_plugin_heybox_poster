@@ -114,7 +114,7 @@ class FakeClient:
 
 class PluginSmokeTests(unittest.TestCase):
     def _plugin(self, context=None, **config):
-        base = {"cookie": "user_pkey=a; x_xhh_tokenid=b", "heybox_id": "1"}
+        base = {"cookie": "user_pkey=a; x_xhh_tokenid=b", "heybox_id": "1", "dry_run": False}
         base.update(config)
         plugin = XhhPosterPlugin(context=context, config=base)
         box = Outbox(":memory:")
@@ -132,10 +132,15 @@ class PluginSmokeTests(unittest.TestCase):
 
         async def run():
             first = plugin._get_client()
+            self.assertIs(plugin._get_client(), first)
             plugin.config["heybox_id"] = "2"
             second = plugin._get_client()
             self.assertIsNot(first, second)
             self.assertNotEqual(first._account_key, second._account_key)
+            plugin.config["cookie"] = "user_pkey=new; x_xhh_tokenid=b"
+            third = plugin._get_client()
+            self.assertIsNot(second, third)
+            self.assertEqual(third.cookie, plugin.config["cookie"])
             await plugin.terminate()
 
         asyncio.run(run())
@@ -244,6 +249,137 @@ class PluginSmokeTests(unittest.TestCase):
         asyncio.run(run())
         plugin._get_client.assert_not_called()
 
+    def test_missing_dry_run_defaults_to_preview_for_all_write_entrypoints(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        for value in ("missing", None):
+            with self.subTest(value=value):
+                plugin = self._plugin(default_topic_ids="43", cooldown_seconds=0)
+                if value == "missing":
+                    del plugin.config["dry_run"]
+                else:
+                    plugin.config["dry_run"] = value
+                plugin._get_client = mock.Mock(side_effect=AssertionError("must not write"))
+
+                async def run():
+                    event = AstrMessageEvent(role="admin", message="/xhh发帖 标题|正文|43")
+                    replies = [reply async for reply in plugin.cmd_post(event)]
+                    replies.append(await plugin.tool_publish(event, "标题", "正文", topic_ids="43"))
+                    event.message_str = "/xhh删除 123"
+                    replies.extend([reply async for reply in plugin.cmd_delete(event)])
+                    return replies
+
+                for reply in asyncio.run(run()):
+                    self.assertIn("dry-run", reply)
+                plugin._get_client.assert_not_called()
+
+    def test_publish_entrypoints_preserve_success_duplicate_and_error_results(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        for command in (True, False):
+            for result, expected in (
+                ({"link_id": "123"}, "发布成功"),
+                ({"link_id": "123", "duplicate": True}, "去重窗口"),
+                (NetworkError("连接中断"), "发送结果未知"),
+                (ValueError("无效参数"), "参数错误"),
+            ):
+                with self.subTest(command=command, result=result):
+                    plugin = self._plugin()
+                    client = mock.Mock(publish=mock.AsyncMock())
+                    if isinstance(result, Exception):
+                        client.publish.side_effect = result
+                    else:
+                        client.publish.return_value = result
+                    plugin._get_client = lambda: client
+
+                    async def run():
+                        event = AstrMessageEvent(role="admin", message="/xhh发帖 标题|正文|43")
+                        if command:
+                            return [reply async for reply in plugin.cmd_post(event)][0]
+                        return await plugin.tool_publish(event, "标题", "正文", topic_ids="43")
+
+                    self.assertIn(expected, asyncio.run(run()))
+                    client.publish.assert_awaited_once_with(
+                        "标题", "正文", mode="dynamic", topic_ids=["43"], draft=False, view_limit=2,
+                    )
+
+    def test_command_and_tool_share_sender_cooldown(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        for command_first in (True, False):
+            with self.subTest(command_first=command_first):
+                plugin = self._plugin()
+                client = mock.Mock(publish=mock.AsyncMock(return_value={"link_id": "123"}))
+                plugin._get_client = lambda: client
+
+                async def run():
+                    event = AstrMessageEvent(role="admin", message="/xhh发帖 标题|正文|43")
+
+                    async def command():
+                        return [reply async for reply in plugin.cmd_post(event)][0]
+
+                    async def tool():
+                        return await plugin.tool_publish(event, "标题", "正文", topic_ids="43")
+
+                    first, second = (command, tool) if command_first else (tool, command)
+                    self.assertIn("发布成功", await first())
+                    self.assertIn("太频繁", await second())
+
+                asyncio.run(run())
+                client.publish.assert_awaited_once()
+
+    def test_tool_preserves_publish_options_and_dry_run_forms(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        for mode in ("dynamic", "article"):
+            for draft in (False, True):
+                for visibility in (1, 2, 3):
+                    for dry_run in (False, True):
+                        with self.subTest(mode=mode, draft=draft, visibility=visibility, dry_run=dry_run):
+                            plugin = self._plugin(view_limit=visibility, dry_run=dry_run)
+                            client = mock.Mock(publish=mock.AsyncMock(return_value={"link_id": "123"}))
+                            plugin._get_client = mock.Mock(return_value=client)
+                            reply = asyncio.run(plugin.tool_publish(
+                                AstrMessageEvent(role="admin"), "标题", "正文", topic_ids="43",
+                                mode=mode, draft=draft,
+                            ))
+                            if dry_run:
+                                plugin._get_client.assert_not_called()
+                                self.assertIn("dry-run", reply)
+                                self.assertIn(f"'view_limit': '{visibility}'", reply)
+                                self.assertEqual("'draft': '1'" in reply, draft)
+                                self.assertIn(f"'link_tag': '{11 if mode == 'article' else 27}'", reply)
+                            else:
+                                client.publish.assert_awaited_once_with(
+                                    "标题", "正文", mode=mode, topic_ids=["43"], draft=draft,
+                                    view_limit=visibility,
+                                )
+                                self.assertIn("草稿已保存" if draft else "发布成功", reply)
+
+    def test_initialization_respects_disabled_outbox_purge(self):
+        for days in (0, -1, 7):
+            with self.subTest(days=days):
+                plugin = self._plugin(outbox_purge_days=days)
+                box = plugin._get_outbox()
+                with mock.patch("time.time", return_value=time.time() - 30 * 86400):
+                    box.mark_pending("old", {})
+                    box.mark_failed("old")
+                plugin._get_client = lambda: mock.Mock(
+                    account_status=mock.AsyncMock(return_value={"logged_in": True}),
+                    reconcile_outbox=mock.AsyncMock(return_value=0),
+                )
+                asyncio.run(plugin.initialize())
+                self.assertEqual(box.purge(status="failed"), 1 if days <= 0 else 0)
+
+    def test_error_logs_omit_server_payload(self):
+        plugin = self._plugin()
+        exc = XhhError("secret-message", status="failed", path="/bbs/app/api/link/post",
+                       payload={"user_pkey": "secret-pkey", "msg": "secret-message"})
+        with mock.patch("astrbot_plugin_heybox_poster.main.logger.warning") as warning:
+            plugin._log_error(exc)
+        self.assertNotIn("secret", warning.call_args.args[0])
+        self.assertIn("/bbs/app/api/link/post", warning.call_args.args[0])
+
     def test_cooldown(self):
         plugin = self._plugin(cooldown_seconds=60)
         from astrbot.api.event import AstrMessageEvent
@@ -292,23 +428,26 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertEqual(plugin._rate_limit_block("qq:123"), "")
         self.assertEqual(plugin._get_outbox().cooldown_until(plugin._rate_limit_key("qq:123")), 0)
 
-    def test_tool_publish_rate_limited_sets_cooldown(self):
+    def test_publish_entrypoints_persist_rate_limit_and_block_retry(self):
         from astrbot_plugin_heybox_poster.core.client import RateLimited
         from astrbot.api.event import AstrMessageEvent
 
-        plugin = self._plugin()
-        event = AstrMessageEvent("10001", role="admin")
+        for command in (True, False):
+            with self.subTest(command=command):
+                plugin = self._plugin(cooldown_seconds=0)
+                client = mock.Mock(publish=mock.AsyncMock(side_effect=RateLimited("请稍后再试")))
+                plugin._get_client = lambda: client
+                event = AstrMessageEvent("10001", "/xhh发帖 标题|正文|43", role="admin")
 
-        class FailingClient:
-            async def publish(self, *args, **kwargs):
-                raise RateLimited("发帖频率过快，请稍后再试")
+                async def run():
+                    if command:
+                        return [reply async for reply in plugin.cmd_post(event)][0]
+                    return await plugin.tool_publish(event, "标题", "正文", topic_ids="43")
 
-        plugin._get_client = lambda: FailingClient()
-        result = asyncio.run(
-            plugin.tool_publish(event, "标题", "正文", topic_ids="43")
-        )
-        self.assertIn("稍后再试", result)
-        self.assertGreater(plugin._get_outbox().cooldown_until(plugin._rate_limit_key("10001")), time.time())
+                self.assertIn("稍后再试", asyncio.run(run()))
+                self.assertGreater(plugin._get_outbox().cooldown_until(plugin._rate_limit_key("10001")), time.time())
+                self.assertIn("刚触发限流", asyncio.run(run()))
+                client.publish.assert_awaited_once()
 
     def test_resolve_topics_by_name(self):
         plugin = self._plugin()
@@ -317,10 +456,12 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertEqual(ids, ["43"])
 
     def test_resolve_topics_priority(self):
-        plugin = self._plugin(default_topic_ids="99")
+        plugin = self._plugin(default_topic_ids=" 99， 100, , ")
         plugin._get_client = lambda: FakeClient()
-        self.assertEqual(asyncio.run(plugin._resolve_topics("", "7,8")), ["7", "8"])
-        self.assertEqual(asyncio.run(plugin._resolve_topics("", "")), ["99"])
+        self.assertEqual(asyncio.run(plugin._resolve_topics("Steam", " 7，8, , ")), ["7", "8"])
+        self.assertEqual(asyncio.run(plugin._resolve_topics("Steam")), ["43"])
+        self.assertEqual(asyncio.run(plugin._resolve_topics(" 123 ")), ["123"])
+        self.assertEqual(asyncio.run(plugin._resolve_topics("", "")), ["99", "100"])
 
     def test_missing_topic_raises(self):
         plugin = self._plugin()

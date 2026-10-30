@@ -87,7 +87,7 @@ Cookie 需包含 `user_pkey` 与 `x_xhh_tokenid`，并建议填写当前账号�
 | `heybox_id` | 空 | 当前账号 ID，扫码自动保存 |
 | `outbox_path` | 空 | 发送记录数据库路径，默认位于 AstrBot 插件数据目录 |
 | `outbox_dedup_seconds` | `600` | 同账号、相同提交表单的成功发送去重窗口，单位秒 |
-| `outbox_purge_days` | `7` | 启动时清理多少天前的失败记录 |
+| `outbox_purge_days` | `7` | 启动时清理多少天前的失败记录；`0` 禁用 |
 
 限流冷却按账号和平台发送者分别记录，重启后继续生效。正在发送或结果未知的请求会持续阻止重复提交，不受成功发送去重窗口限制。
 
@@ -102,7 +102,7 @@ Cookie 需包含 `user_pkey` 与 `x_xhh_tokenid`，并建议填写当前账号�
 
 ## 📚 更多资料
 
-[更新日志](CHANGELOG.md) · [验证与待办](TODO.md) · [扫码诊断](QR_LOGIN_DIAGNOSIS.md)
+[更新日志](CHANGELOG.md) · [验证与待办](TODO.md) · [扫码诊断](QR_LOGIN_DIAGNOSIS.md) · [开发与 Agent 维护指南](AGENTS.md)
 
 本项目以 [MIT License](LICENSE) 发布。感谢 xiaoheihe-cli、小黑盒适配器等参考项目，完整引用与许可声明见[第三方声明](THIRD_PARTY_NOTICES.md)。
 

@@ -13,7 +13,7 @@
 
 ## 离线回归已覆盖
 
-当前通过 109 项 Python 单测和 Node.js 页面交互自检（使用 DOM / bridge 桩，未启动真实 AstrBot）。本机独立扫码验证另见 `QR_LOGIN_DIAGNOSIS.md`。
+当前通过 116 项 Python 单测和 Node.js 页面交互自检（使用 DOM / bridge 桩，未启动真实 AstrBot）。本机独立扫码验证另见 `QR_LOGIN_DIAGNOSIS.md`。
 
 - [x] 并发去重、任务取消保留待对账、旧 outbox 记录兼容
 - [x] `dry_run=true` 删除预演，HTTP 5xx / 异常响应保留 `send_unknown`

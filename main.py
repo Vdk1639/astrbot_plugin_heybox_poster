@@ -1,6 +1,6 @@
 """AstrBot 小黑盒发帖插件。
 
-给 LLM 提供三个函数工具（发帖 / 搜话题 / 查登录态），另带几个手动指令。
+提供发帖、搜话题、查登录态和查帖子四个 LLM 工具，另带手动指令。
 签名、表单编码、风控错误处理都在 ``core`` 里，这里只做 AstrBot 适配。
 """
 
@@ -42,7 +42,6 @@ class XhhPosterPlugin(Star):
         super().__init__(context)
         self.config = config
         self._client: XhhClient | None = None
-        self._client_cookie = ""
         self._last_post_at: dict[str, float] = {}
         self._outbox: Outbox | None = None
         self._locks: dict[str, asyncio.Lock] = {}
@@ -95,7 +94,7 @@ class XhhPosterPlugin(Star):
         heybox_id = str(self._c("heybox_id", "") or "").strip()
         if not cookie:
             raise XhhError("还没有配置 cookie：请在插件配置里填 cookie（或 user_pkey + x_xhh_tokenid）")
-        if (self._client is None or cookie != self._client_cookie
+        if (self._client is None or cookie != self._client.cookie
                 or heybox_id != self._client.heybox_id):
             if self._client is not None:
                 # 旧客户端交给事件循环回收，这里不阻塞
@@ -109,7 +108,6 @@ class XhhPosterPlugin(Star):
                 timeout=float(self._c("request_timeout", 20) or 20),
                 outbox=self._get_outbox(),
             )
-            self._client_cookie = cookie
         return self._client
 
     def _get_outbox(self) -> Outbox:
@@ -182,8 +180,8 @@ class XhhPosterPlugin(Star):
         except Exception:
             pass
         try:
-            days = int(self._c("outbox_purge_days", 7) or 7)
-            purged = self._get_outbox().purge(status="failed", older_than_days=days)
+            days = int(self._c("outbox_purge_days", 7))
+            purged = self._get_outbox().purge(status="failed", older_than_days=days) if days > 0 else 0
             if purged:
                 logger.info(f"[{PLUGIN_NAME}] 清理 {purged} 条过期 failed 记录")
         except Exception:
@@ -318,12 +316,11 @@ class XhhPosterPlugin(Star):
         return f"发帖失败：{type(exc).__name__}: {exc}"
 
     def _log_error(self, exc: Exception) -> None:
-        """把原始错误码/msg 落日志，方便线上出问题时回溯。"""
+        """记录错误类型与接口，不输出可能含凭据的服务端响应。"""
         if isinstance(exc, XhhError):
             logger.warning(
                 f"[{PLUGIN_NAME}] 发帖失败：{type(exc).__name__} "
-                f"status={getattr(exc, 'status', None)} "
-                f"payload={getattr(exc, 'payload', None)}"
+                f"path={exc.path}"
             )
 
     # ------------------------------------------------------------------
@@ -389,7 +386,6 @@ class XhhPosterPlugin(Star):
         if self._client is not None:
             asyncio.create_task(self._client.close())
             self._client = None
-        self._client_cookie = ""
         if self._cookie():
             self._get_client()
         if not backup:
@@ -427,50 +423,10 @@ class XhhPosterPlugin(Star):
             yield event.plain_result("用法：/xhh发帖 标题|正文|话题名或ID（第三段可省略，用默认话题）")
             return
 
-        title, text = parts[0], parts[1]
-        topic = parts[2] if len(parts) > 2 else ""
-        async with self._lock_for(self._sender(event)):
-            block = self._rate_limit_block(self._sender(event))
-            if block:
-                yield event.plain_result(block)
-                return
-            wait = self._check_cooldown(event)
-            if wait:
-                yield event.plain_result(wait)
-                return
-
-            rate_account = account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
-            dry_run = bool(self._c("dry_run", False))
-            try:
-                client = None if dry_run else self._get_client()
-                topic_ids = await self._resolve_topics(topic)
-                view_limit = self._view_limit()
-                if dry_run:
-                    form = build_post_form(
-                        title, text, topic_ids=topic_ids, view_limit=view_limit
-                    )
-                    yield event.plain_result(f"[dry-run] 将提交：{form}")
-                    return
-                result = await client.publish(
-                    title,
-                    text,
-                    mode="dynamic",
-                    topic_ids=topic_ids,
-                    view_limit=view_limit,
-                )
-                if result.get("duplicate"):
-                    yield event.plain_result(
-                        f"相同内容在去重窗口内已发送过，link_id={result.get('link_id') or '（未知）'}"
-                    )
-                else:
-                    yield event.plain_result(
-                        f"发布成功，link_id={result.get('link_id') or '（未返回）'}"
-                    )
-            except Exception as exc:
-                if isinstance(exc, RateLimited):
-                    self._record_rate_limit(self._sender(event), rate_account)
-                self._log_error(exc)
-                yield event.plain_result(self._friendly_error(exc))
+        result = await self._publish(
+            event, parts[0], parts[1], topic=parts[2] if len(parts) > 2 else ""
+        )
+        yield event.plain_result(result)
 
     @filter.command("xhh话题")
     async def cmd_topics(self, event: AstrMessageEvent):
@@ -509,7 +465,7 @@ class XhhPosterPlugin(Star):
         if not link_id:
             yield event.plain_result("用法：/xhh删除 <link_id>")
             return
-        if self._c("dry_run", False):
+        if self._c("dry_run", True):
             yield event.plain_result(f"[dry-run] 未真正删除，link_id={link_id}")
             return
         try:
@@ -605,15 +561,25 @@ class XhhPosterPlugin(Star):
         """
         if not self._is_allowed(event):
             return "当前用户没有发帖权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。"
-        async with self._lock_for(self._sender(event)):
-            block = self._rate_limit_block(self._sender(event))
+        return await self._publish(
+            event, title, text, topic=topic, topic_ids=topic_ids, mode=mode, draft=draft
+        )
+
+    async def _publish(
+        self, event: AstrMessageEvent, title: str, text: str, *,
+        topic: str = "", topic_ids: str = "", mode: str = "dynamic", draft: bool = False,
+    ) -> str:
+        """指令与 LLM 工具共用发布流程；入口各自检查权限。"""
+        sender = self._sender(event)
+        async with self._lock_for(sender):
+            block = self._rate_limit_block(sender)
             if block:
                 return block
             wait = self._check_cooldown(event)
             if wait:
                 return wait
             rate_account = account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
-            dry_run = bool(self._c("dry_run", False))
+            dry_run = bool(self._c("dry_run", True))
             try:
                 client = None if dry_run else self._get_client()
                 ids = await self._resolve_topics(topic, topic_ids)
@@ -638,7 +604,7 @@ class XhhPosterPlugin(Star):
                 )
             except Exception as exc:
                 if isinstance(exc, RateLimited):
-                    self._record_rate_limit(self._sender(event), rate_account)
+                    self._record_rate_limit(sender, rate_account)
                 self._log_error(exc)
                 return self._friendly_error(exc)
 
@@ -654,7 +620,7 @@ class XhhPosterPlugin(Star):
     # ------------------------------------------------------------------
     async def _resolve_topics(self, topic: str = "", raw_ids: str = "") -> list[str]:
         """话题解析优先级：显式 ID > 名称搜索 > 配置默认值。"""
-        ids = [x.strip() for x in str(raw_ids or "").replace("，", ",").split(",") if x.strip()]
+        ids = self._normalize_ids(str(raw_ids or ""))
         if ids:
             return ids
 
@@ -667,8 +633,7 @@ class XhhPosterPlugin(Star):
                 raise XhhError(f"没有找到话题「{keyword}」，请先用 xhh_search_topics 确认")
             return [found[0]["topic_id"]]
 
-        defaults = str(self._c("default_topic_ids", "") or "")
-        ids = [x.strip() for x in defaults.replace("，", ",").split(",") if x.strip()]
+        ids = self._normalize_ids(str(self._c("default_topic_ids", "") or ""))
         if not ids:
             raise XhhError("缺少话题：请传 topic / topic_ids，或在插件配置里设置 default_topic_ids")
         return ids

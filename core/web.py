@@ -171,17 +171,16 @@ class AccountWebUI:
         async with self._lock:
             cookie = self.plugin._cookie()
             heybox_id = str(self.plugin._c("heybox_id", "") or "").strip()
-            try:
-                if not cookie:
-                    self._account = {"logged_in": False}
-                else:
+            account = {"logged_in": False}
+            if cookie:
+                try:
                     # 使用独立实例，防止检查旧账号的返回值覆盖正在切换的新账号。
                     status = await self._verify_account(cookie, heybox_id)
-                    if cookie == self.plugin._cookie() and heybox_id == str(self.plugin._c("heybox_id", "") or "").strip():
-                        self._account = {key: status[key] for key in ("logged_in", "nickname", "user_id") if key in status}
-            except Exception:
-                if cookie == self.plugin._cookie() and heybox_id == str(self.plugin._c("heybox_id", "") or "").strip():
-                    self._account = {"logged_in": None, "check_unavailable": True}
+                    account = {key: status[key] for key in ("logged_in", "nickname", "user_id") if key in status}
+                except Exception:
+                    account = {"logged_in": None, "check_unavailable": True}
+            if cookie == self.plugin._cookie() and heybox_id == str(self.plugin._c("heybox_id", "") or "").strip():
+                self._account = account
             return json_response(self._snapshot())
 
     async def logout(self):
