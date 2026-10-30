@@ -22,6 +22,21 @@ const operations = {
   cancel: "正在取消扫码…", check: "正在检查当前账号的登录状态…", logout: "正在清除本地登录态…",
 };
 
+function renderSteps(state) {
+  const current = { idle: 0, requesting: 0, wait: 0, scanned: 1, saving: 2 }[state] ?? -1;
+  const completed = state === "success" ? 3 : Math.max(0, current);
+  for (let index = 0; index < 3; index++) {
+    const id = `step-${index + 1}`;
+    const done = index < completed;
+    const selected = index === current;
+    $(id).dataset.step = done ? "done" : selected ? "current" : "pending";
+    $(id + "-number").textContent = done ? "✓" : String(index + 1);
+    $(id + "-state").textContent = done ? "已完成" : selected ? "进行中" : "未开始";
+    if (selected) $(id).setAttribute("aria-current", "step");
+    else $(id).removeAttribute("aria-current");
+  }
+}
+
 function controls() {
   for (const id of ["start", "cancel", "check", "logout"]) {
     $(id).disabled = !connected || Boolean(pending) ||
@@ -37,6 +52,8 @@ function controls() {
 function renderQr() {
   const remaining = Math.max(0, Math.ceil((login.expires_at || 0) - Date.now() / 1000));
   const elapsed = Boolean(login.expires_at) && remaining === 0;
+  renderSteps(pending === "start" ? "requesting" : qrStale ? "unknown" :
+    elapsed && ["wait", "scanned"].includes(login.state) ? "expired" : login.state);
   const showQr = Boolean(login.qr_image) && ["wait", "scanned"].includes(login.state) &&
     !elapsed && !qrStale && pending !== "start";
   $("qr").hidden = !showQr;

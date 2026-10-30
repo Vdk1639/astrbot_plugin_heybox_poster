@@ -28,7 +28,9 @@
       <section aria-labelledby="qr-title">
         <h2 id="qr-title">扫码登录 / 切换账号</h2>
         <ol class="steps" aria-label="登录步骤">
-          <li>App 扫码</li><li>手机确认</li><li>自动保存</li>
+          <li id="step-1"><span id="step-1-number" class="step-number" aria-hidden="true">1</span><span class="step-label">App 扫码</span><span id="step-1-state" class="step-state">未开始</span></li>
+          <li id="step-2"><span id="step-2-number" class="step-number" aria-hidden="true">2</span><span class="step-label">手机确认</span><span id="step-2-state" class="step-state">未开始</span></li>
+          <li id="step-3"><span id="step-3-number" class="step-number" aria-hidden="true">3</span><span class="step-label">自动保存</span><span id="step-3-state" class="step-state">未开始</span></li>
         </ol>
         <div id="qr-stage" class="qr-stage" aria-busy="false">
           <img id="qr" width="256" height="256" alt="使用小黑盒 App 扫描此二维码登录" hidden>

@@ -53,7 +53,19 @@ async function page(withBridge = true, setup = () => {}) {
   return { elements, state, trigger };
 }
 
+function assertSteps(elements, expected) {
+  for (const [index, status] of expected.entries()) {
+    const id = `step-${index + 1}`;
+    assert.equal(elements.get(id).dataset.step, status, id);
+    assert.equal(elements.get(id)["aria-current"], status === "current" ? "step" : undefined, id);
+    assert.equal(elements.get(id + "-number").textContent, status === "done" ? "✓" : String(index + 1), id);
+    assert.equal(elements.get(id + "-state").textContent,
+      status === "done" ? "已完成" : status === "current" ? "进行中" : "未开始", id);
+  }
+}
+
 const { elements, state, trigger } = await page();
+assertSteps(elements, ["current", "pending", "pending"]);
 assert.match(elements.get("account").textContent, /42/);
 assert.deepEqual(state.calls.slice(0, 2), [["GET", "auth/status"], ["POST", "auth/check"]]);
 assert.match(elements.get("account-state").textContent, /待检查/);
@@ -65,6 +77,7 @@ assert.equal(elements.get("qr").hidden, false);
 assert.equal(elements.get("cancel").disabled, false);
 assert.equal(elements.get("qr-placeholder").hidden, true);
 assert.match(elements.get("expiry").textContent, /有效期剩余/);
+assertSteps(elements, ["current", "pending", "pending"]);
 state.data.login = { state: "scanned", qr_image: "data:image/png;base64,test",
   session_id: "abc123", poll_count: 4, updated_at: Date.now() / 1000, retrying: true, retries: 2 };
 state.timers[0]();
@@ -74,13 +87,18 @@ assert.match(elements.get("status").textContent, /等待服务端确认/);
 assert.match(elements.get("status").textContent, /正在重试/);
 assert.match(elements.get("progress").textContent, /abc123.*4.*最后响应/);
 assert.equal(elements.get("diagnostics").hidden, false);
+assertSteps(elements, ["done", "current", "pending"]);
 state.data.login.retrying = false;
 state.timers[0]();
 await new Promise(setImmediate);
 assert.doesNotMatch(elements.get("status").textContent, /正在重试/);
+assertSteps(elements, ["done", "current", "pending"]);
+state.data.login = { state: "saving" };
+await state.timers[0]();
+assertSteps(elements, ["done", "done", "current"]);
 state.data = { account: { has_credentials: true, logged_in: true, user_id: "99", nickname: "<script>test</script>" },
   login: { state: "success" } };
-await trigger("check");
+await state.timers[0]();
 assert.equal(elements.get("qr").hidden, true);
 assert.equal(elements.get("qr").src, undefined);
 assert.match(elements.get("account").textContent, /99/);
@@ -88,6 +106,7 @@ assert.match(elements.get("account-state").textContent, /已登录/);
 assert.equal(elements.get("cancel").disabled, true);
 assert.equal(elements.get("qr-placeholder-title").textContent, "账号已保存");
 assert.equal(elements.get("diagnostics").hidden, true);
+assertSteps(elements, ["done", "done", "done"]);
 state.data.account = { has_credentials: true, check_unavailable: true, logged_in: null, user_id: "99" };
 await trigger("check");
 assert.match(elements.get("account-state").textContent, /暂时无法验证/);
@@ -114,6 +133,7 @@ assert.match(elements.get("operation").textContent, /本地凭据与备份已清
 state.data.login = { state: "failed", message: "读取新账号 ID 失败，原账号保留。" };
 await trigger("check");
 assert.match(elements.get("status").textContent, /读取新账号 ID/);
+assertSteps(elements, ["pending", "pending", "pending"]);
 
 state.fail = true;
 await trigger("start");
@@ -122,6 +142,7 @@ assert.doesNotMatch(elements.get("error").textContent, /secret-payload/);
 assert.equal(elements.get("start").disabled, false);
 assert.match(elements.get("qr-placeholder-title").textContent, /未确认/);
 assert.doesNotMatch(elements.get("status").textContent, /登录成功/);
+assertSteps(elements, ["pending", "pending", "pending"]);
 state.events.pagehide();
 assert.equal(state.cleared, true);
 state.events.pageshow({ persisted: true });
@@ -136,6 +157,7 @@ assert.equal(expiry.elements.get("qr").hidden, true);
 assert.equal(expiry.elements.get("qr").src, undefined);
 assert.match(expiry.elements.get("qr-placeholder-title").textContent, /过期/);
 assert.match(expiry.elements.get("status").textContent, /等待服务端最终结果/);
+assertSteps(expiry.elements, ["pending", "pending", "pending"]);
 assert.equal(expiry.elements.get("start").disabled, false);
 const qrRequests = expiry.state.calls.filter(([, path]) => path === "auth/qr").length;
 await expiry.state.timers[0]();
@@ -144,6 +166,7 @@ expiry.state.data.login = { state: "expired", qr_image: "data:image/png;base64,o
 await expiry.state.timers[0]();
 assert.equal(expiry.elements.get("qr").hidden, true);
 assert.equal(expiry.elements.get("cancel").disabled, true);
+assertSteps(expiry.elements, ["pending", "pending", "pending"]);
 
 // 后台请求不阻止取消，延迟到达的旧快照不能覆盖取消结果。
 const race = await page();
@@ -165,6 +188,7 @@ finishPoll(waiting);
 await oldPoll;
 assert.equal(race.elements.get("status").textContent, "扫码已取消");
 assert.equal(race.elements.get("qr").hidden, true);
+assertSteps(race.elements, ["pending", "pending", "pending"]);
 
 // 前台请求有具体反馈且去重；刷新期间不再展示旧码。
 let finishPost;
@@ -173,6 +197,7 @@ const newQr = race.trigger("start");
 assert.equal(race.elements.get("start").textContent, "正在获取…");
 assert.match(race.elements.get("operation").textContent, /正在获取新二维码/);
 assert.equal(race.elements.get("qr-stage")["aria-busy"], "true");
+assertSteps(race.elements, ["current", "pending", "pending"]);
 const foregroundCalls = race.state.calls.length;
 await race.trigger("start");
 assert.equal(race.state.calls.length, foregroundCalls);
@@ -234,6 +259,47 @@ await malformed.state.timers[0]();
 assert.match(malformed.elements.get("error").textContent, /正在重试/);
 assert.equal(malformed.elements.get("cancel").disabled, false);
 
+// 刷新立即重置旧成功；刷新失败、未知状态和到期均不能复活完成标记。
+const progress = await page(true, (next) => {
+  next.data = { account: { has_credentials: true }, login: { state: "success" } };
+});
+assertSteps(progress.elements, ["done", "done", "done"]);
+let rejectRefresh;
+progress.state.post = () => new Promise((resolve, reject) => { rejectRefresh = reject; });
+const refreshing = progress.trigger("start");
+assertSteps(progress.elements, ["current", "pending", "pending"]);
+rejectRefresh(new Error("secret-payload"));
+await refreshing;
+assertSteps(progress.elements, ["pending", "pending", "pending"]);
+assert.match(progress.elements.get("qr-placeholder-title").textContent, /未确认/);
+progress.state.post = undefined;
+progress.state.data.login = { state: "scanned", expires_at: Date.now() / 1000 + 120 };
+await progress.trigger("start");
+assertSteps(progress.elements, ["done", "current", "pending"]);
+progress.state.fail = true;
+await progress.state.timers[0]();
+assertSteps(progress.elements, ["done", "current", "pending"]);
+progress.state.fail = false;
+progress.state.data.login.retrying = true;
+progress.state.data.login.retries = 1;
+await progress.state.timers[0]();
+assertSteps(progress.elements, ["done", "current", "pending"]);
+progress.state.data.login.expires_at = Date.now() / 1000 - 1;
+await progress.state.timers[0]();
+assertSteps(progress.elements, ["pending", "pending", "pending"]);
+assert.match(progress.elements.get("qr-placeholder-title").textContent, /过期/);
+for (const loginState of ["canceled", "failed", "expired", "unexpected"]) {
+  progress.state.data.login = { state: loginState };
+  await progress.trigger("check");
+  assertSteps(progress.elements, ["pending", "pending", "pending"]);
+}
+progress.state.data.login = { state: "requesting" };
+await progress.trigger("check");
+assertSteps(progress.elements, ["current", "pending", "pending"]);
+progress.state.data.login = { state: "success" };
+await progress.state.timers[0]();
+assertSteps(progress.elements, ["done", "done", "done"]);
+
 const disconnected = await page(true, (next) => {
   next.ready = Promise.reject(new Error("secret-payload"));
 });
@@ -245,4 +311,4 @@ assert.equal(disconnected.state.calls.length, 0);
 const standalone = await page(false);
 assert.match(standalone.elements.get("error").textContent, /AstrBot WebUI/);
 assert.equal(standalone.elements.get("start").disabled, true);
-console.log("Account page bridge, QR expiry, concurrent operations, redaction, confirmation and lifecycle checks passed.");
+console.log("Account page bridge, login steps, QR expiry, concurrent operations, redaction, confirmation and lifecycle checks passed.");
