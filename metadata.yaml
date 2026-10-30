@@ -2,6 +2,6 @@ name: astrbot_plugin_heybox_poster
 display_name: 小黑盒发帖
 desc: 让 LLM 在小黑盒发动态/长文/草稿；内置 hkey 与 Workshop _rnd 签名，支持话题搜索与登录态检查
 version: v0.5.5
-astrbot_version: ">=4.24.2,<5"
+astrbot_version: ">=4.26.0,<5"
 author: Vdk1639
 repo: "https://github.com/Vdk1639/astrbot_plugin_heybox_poster.git"
