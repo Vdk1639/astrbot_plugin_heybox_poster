@@ -25,6 +25,12 @@ const operations = {
 function renderSteps(state) {
   const current = { idle: 0, requesting: 0, wait: 0, scanned: 1, saving: 2 }[state] ?? -1;
   const completed = state === "success" ? 3 : Math.max(0, current);
+  const steps = $("login-steps");
+  const focus = current >= 0 ? String(current) : "none";
+  if (steps.dataset.focus !== focus) {
+    steps.dataset.focus = focus;
+    if (current >= 0) steps.style.setProperty("--step-index", String(current));
+  }
   for (let index = 0; index < 3; index++) {
     const id = `step-${index + 1}`;
     const done = index < completed;
