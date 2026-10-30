@@ -79,6 +79,15 @@ def content_fingerprint(account: str, form: dict[str, str]) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def account_key(cookie: str, heybox_id: str) -> str:
+    """同一账号的发帖记录与持久限流共用标识。"""
+    if heybox_id:
+        return "id:" + heybox_id
+    pkey = SimpleCookie(cookie).get("user_pkey")
+    # shortcut: 未配置账号 ID 时依赖登录凭据，需跨重新登录去重时配置 heybox_id。
+    return "session:" + hashlib.sha256((pkey.value if pkey else cookie).encode("utf-8")).hexdigest()
+
+
 def build_post_form(
     title: str,
     content: str,
@@ -143,12 +152,10 @@ class XhhClient:
         self.timeout = float(timeout)
         self.base = base.rstrip("/")
         self.outbox = outbox
-        pkey = SimpleCookie(self.cookie).get("user_pkey")
-        # shortcut: 未配置账号 ID 时依赖登录凭据，需跨重新登录去重时配置 heybox_id。
-        self._account_key = (
-            "id:" + self.heybox_id if self.heybox_id else
-            "session:" + hashlib.sha256((pkey.value if pkey else self.cookie).encode("utf-8")).hexdigest()
-        )
+        self._account_key = account_key(self.cookie, self.heybox_id)
+        self._opener = None
+        device = SimpleCookie(self.cookie).get("device_id")
+        self.device_id = device.value if device else ""
 
     # ------------------------------------------------------------------
     @property
@@ -169,6 +176,8 @@ class XhhClient:
     def _build_url(self, path: str, params: dict | None, write: bool) -> str:
         signed = signed_params(path)
         query: dict[str, Any] = dict(BASE_PARAMS)
+        if self.device_id:
+            query["device_id"] = self.device_id
         query.update({k: v for k, v in (params or {}).items() if v is not None})
         if self.heybox_id:
             query["heybox_id"] = self.heybox_id
@@ -193,9 +202,10 @@ class XhhClient:
             headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
 
         req = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
+        open_url = self._opener.open if self._opener is not None else urllib.request.urlopen
         try:
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                with open_url(req, timeout=self.timeout) as resp:
                     code, raw = resp.status, resp.read()
             except urllib.error.HTTPError as exc:
                 code, raw = exc.code, exc.read()
@@ -267,20 +277,24 @@ class XhhClient:
         """返回 ``{logged_in, nickname, user_id, ...}``。"""
         path = "/account/restore_login"
         try:
-            payload = await self.request("GET", path)
-        except XhhError:
-            return {"logged_in": False}
-        if payload.get("status") != "ok":
-            return {"logged_in": False, "status": payload.get("status")}
-        result = payload.get("result") or {}
-        profile = result.get("profile") or {}
+            result = self._unwrap(await self.request("GET", path), path)
+        except XhhError as exc:
+            if exc.status in {"login", "relogin", "expired"}:
+                return {"logged_in": False}
+            raise NetworkError("登录检查暂时不可用，请稍后重试", path=path) from None
+        profile = result.get("profile") or result.get("account_detail") or result
+        if not isinstance(profile, dict):
+            raise NetworkError("登录检查响应缺少账号信息", path=path)
+        uid = profile.get("heybox_id") or profile.get("heyboxid") or profile.get("userid") or result.get("heybox_id")
+        if not uid:
+            raise NetworkError("登录检查响应缺少账号 ID", path=path)
         return {
-            "logged_in": True,
+            "logged_in": bool(uid),
             "nickname": profile.get("nickname") or "",
-            "user_id": str(profile.get("heybox_id") or result.get("heybox_id") or ""),
+            "user_id": str(uid or ""),
         }
 
-    async def search_topics(self, keyword: str, limit: int = 10) -> list[dict]:
+    async def search_topics(self, keyword: str, limit: int = 5) -> list[dict]:
         """按名称搜社区/话题，返回 ``[{topic_id, name}]``。"""
         path = "/bbs/app/api/post_editor/topic_selection/search"
         payload = await self.request(

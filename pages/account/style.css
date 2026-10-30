@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: light-dark(#f5f7fa, #171a20); color: light-dark(#17212f, #edf1f7); }
+main { max-width: 760px; margin: auto; padding: 24px; }
+h1 { font-size: 28px; } h2 { font-size: 20px; margin-top: 0; }
+p { line-height: 1.7; overflow-wrap: anywhere; }
+section { padding: 24px; margin: 20px 0; border: 1px solid light-dark(#d7dfe8, #46505e); border-radius: 12px; background: light-dark(white, #222833); }
+button { font: inherit; padding: 10px 16px; margin: 4px 8px 4px 0; border: 1px solid #3859b3; border-radius: 8px; background: #3859b3; color: white; cursor: pointer; }
+button.secondary { background: transparent; color: inherit; border-color: #8390a2; }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible { outline: 3px solid #e49e30; outline-offset: 3px; }
+img { max-width: 100%; height: auto; background: white; }
+.note { font-size: 14px; opacity: .8; }
+#error { color: light-dark(#aa2424, #ffaaaa); }
+dialog { max-width: 420px; padding: 24px; border: 1px solid #8390a2; border-radius: 12px; }
+dialog::backdrop { background: #0008; }

@@ -32,16 +32,26 @@ def _install_astrbot_stubs() -> None:
     event_mod = types.ModuleType("astrbot.api.event")
 
     class AstrMessageEvent:
-        def __init__(self, sender: str = "10001", message: str = "", role: str | None = None):
+        def __init__(self, sender: str = "10001", message: str = "", role: str | None = None,
+                     platform: str = ""):
             self._sender = sender
             self.message_str = message
             self.role = role
+            self._platform = platform
 
         def get_sender_id(self):
             return self._sender
 
         def is_admin(self):
             return self.role == "admin"
+
+        def get_platform_name(self):
+            if not self._platform:
+                raise AttributeError("platform unavailable")
+            return self._platform
+
+        def plain_result(self, text):
+            return text
 
     class _Filter:
         @staticmethod
@@ -91,10 +101,11 @@ from astrbot_plugin_heybox_poster.core.client import (  # noqa: E402
     RateLimited,
     XhhError,
 )
+from astrbot_plugin_heybox_poster.core.outbox import Outbox  # noqa: E402
 
 
 class FakeClient:
-    async def search_topics(self, keyword, limit=10):
+    async def search_topics(self, keyword, limit=5):
         return [{"topic_id": "43", "name": "Steam"}] if keyword == "Steam" else []
 
     async def account_status(self):
@@ -105,7 +116,11 @@ class PluginSmokeTests(unittest.TestCase):
     def _plugin(self, context=None, **config):
         base = {"cookie": "user_pkey=a; x_xhh_tokenid=b", "heybox_id": "1"}
         base.update(config)
-        return XhhPosterPlugin(context=context, config=base)
+        plugin = XhhPosterPlugin(context=context, config=base)
+        box = Outbox(":memory:")
+        self.addCleanup(box.close)
+        plugin._get_outbox = lambda: box
+        return plugin
 
     def test_cookie_composition(self):
         plugin = self._plugin(cookie="", user_pkey="p", x_xhh_tokenid="t")
@@ -131,6 +146,36 @@ class PluginSmokeTests(unittest.TestCase):
 
         self.assertTrue(plugin._is_allowed(AstrMessageEvent("10001")))
         self.assertFalse(plugin._is_allowed(AstrMessageEvent("20002")))
+
+    def test_platform_prefixes_isolate_same_sender_ids(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin(allowed_users=["qq:123", "xhh:456"])
+        for sender, platform, expected in (
+            ("123", "aiocqhttp", True), ("123", "qq_official", True),
+            ("123", "xiaoheihe", False), ("456", "heybox", True),
+            ("456", "aiocqhttp", False), ("123", "discord", False),
+        ):
+            with self.subTest(sender=sender, platform=platform):
+                event = AstrMessageEvent(sender, platform=platform)
+                self.assertEqual(plugin._is_allowed(event), expected)
+
+    def test_bare_whitelist_ids_keep_current_platform_compatibility(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin(allowed_users=["123"])
+        for platform in ("aiocqhttp", "xiaoheihe"):
+            self.assertTrue(plugin._is_allowed(AstrMessageEvent("123", platform=platform)))
+
+    def test_platform_cooldowns_and_locks_are_separate(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin()
+        qq = AstrMessageEvent("123", platform="aiocqhttp")
+        xhh = AstrMessageEvent("123", platform="xiaoheihe")
+        self.assertEqual(plugin._check_cooldown(qq), "")
+        self.assertEqual(plugin._check_cooldown(xhh), "")
+        self.assertIsNot(plugin._lock_for(plugin._sender(qq)), plugin._lock_for(plugin._sender(xhh)))
 
     def test_empty_whitelist_admin_role_allowed(self):
         plugin = self._plugin()
@@ -226,9 +271,26 @@ class PluginSmokeTests(unittest.TestCase):
 
     def test_rate_limit_block(self):
         plugin = self._plugin()
-        plugin._rate_limit_until["10001"] = time.time() + 60
+        plugin._record_rate_limit("10001")
         self.assertIn("秒后再试", plugin._rate_limit_block("10001"))
         self.assertEqual(plugin._rate_limit_block("20002"), "")
+
+    def test_rate_limit_survives_plugin_recreation_and_is_account_scoped(self):
+        plugin = self._plugin()
+        plugin._record_rate_limit("qq:123")
+        reloaded = self._plugin()
+        reloaded._get_outbox = plugin._get_outbox
+        self.assertIn("秒后再试", reloaded._rate_limit_block("qq:123"))
+        self.assertEqual(reloaded._rate_limit_block("xhh:123"), "")
+        reloaded.config["heybox_id"] = "another"
+        self.assertEqual(reloaded._rate_limit_block("qq:123"), "")
+
+    def test_zero_rate_limit_cooldown_disables_persistence(self):
+        plugin = self._plugin(rate_limit_cooldown_seconds=0)
+        plugin._record_rate_limit("qq:123")
+        self.assertEqual(plugin._rate_limit_seconds(), 0)
+        self.assertEqual(plugin._rate_limit_block("qq:123"), "")
+        self.assertEqual(plugin._get_outbox().cooldown_until(plugin._rate_limit_key("qq:123")), 0)
 
     def test_tool_publish_rate_limited_sets_cooldown(self):
         from astrbot_plugin_heybox_poster.core.client import RateLimited
@@ -246,7 +308,7 @@ class PluginSmokeTests(unittest.TestCase):
             plugin.tool_publish(event, "标题", "正文", topic_ids="43")
         )
         self.assertIn("稍后再试", result)
-        self.assertGreater(plugin._rate_limit_until.get("10001", 0), time.time())
+        self.assertGreater(plugin._get_outbox().cooldown_until(plugin._rate_limit_key("10001")), time.time())
 
     def test_resolve_topics_by_name(self):
         plugin = self._plugin()

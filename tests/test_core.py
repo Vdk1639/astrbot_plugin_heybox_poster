@@ -100,6 +100,18 @@ class SignTests(unittest.TestCase):
 
 
 class PostFormTests(unittest.TestCase):
+    def test_visibility_modes_and_drafts_preserve_requested_form(self):
+        for visibility in (1, 2, 3):
+            for mode in ("dynamic", "article"):
+                for draft in (False, True):
+                    with self.subTest(visibility=visibility, mode=mode, draft=draft):
+                        form = build_post_form(
+                            "标题", "正文", topic_ids=["43"],
+                            view_limit=visibility, mode=mode, draft=draft,
+                        )
+                        self.assertEqual(form["view_limit"], str(visibility))
+                        self.assertEqual(form["link_tag"], "11" if mode == "article" else "27")
+                        self.assertEqual(form.get("draft"), "1" if draft else None)
     def test_dynamic_form(self):
         form = build_post_form("标题", "正文", topic_ids=["43"])
         self.assertEqual(form["link_tag"], "27")
@@ -282,6 +294,16 @@ class ClientTests(unittest.TestCase):
         client.request = fake_request
         topics = asyncio.run(client.search_topics("小黑盒", limit=3))
         self.assertEqual(len(topics), 3)
+
+    def test_default_topic_search_returns_five_candidates(self):
+        client = XhhClient("user_pkey=abc")
+        client.request = mock.AsyncMock(return_value={
+            "status": "ok", "result": {"search_result": [
+                {"topic_id": str(number), "name": "同名社区"} for number in range(1, 21)
+            ]},
+        })
+        self.assertEqual(len(asyncio.run(client.search_topics("同名"))), 5)
+        self.assertEqual(client.request.call_args.kwargs["params"]["limit"], 5)
 
     def test_list_my_posts_normalizes(self):
         client = XhhClient("user_pkey=abc; x_xhh_tokenid=def", heybox_id="123")

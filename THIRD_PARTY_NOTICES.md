@@ -2,7 +2,7 @@
 
 本项目 **astrbot_plugin_heybox_poster** 以 [MIT License](LICENSE) 发布。
 
-开发过程中参考了下列公开项目。除「测试数据」一节说明的样本外，本项目未复制其源代码。
+开发过程中参考了下列公开项目，改编代码及测试数据的范围如下。
 
 ## xiaoheihe-cli — MIT
 
@@ -44,6 +44,39 @@ SOFTWARE.
 - 范围：仅作为签名算法的回归测试向量，**不包含其源代码**
 - 本项目未整体采用 GPL-3.0；如不接受该引用，可删除 `SAMPLES` 常量及
   `test_hkey_matches_captured_samples` 用例，或替换为自己抓取的样本
+
+## astrbot_plugin_xiaoheihe_adapter — MIT
+
+`core/login.py` 参考其扫码状态、JSON 凭据解析与轮询方案，客户端标识生成公式
+改编自其 `xiaoheihe/request_signing.py`。保留完整许可：
+
+`debug_qr.py` 的对照模式采用其 GET 公共参数与请求头；网络传输、诊断记录和凭据检查复用本项目现有客户端。
+
+```text
+MIT License
+
+Copyright (c) 2026 RyanVaderAn
+
+https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## 其他参考项目（未使用代码）
 

@@ -152,6 +152,28 @@ class OutboxTests(unittest.TestCase):
             removed = box.purge(status="failed", older_than_days=7)
             self.assertEqual(removed, 1)
 
+    def test_cooldown_survives_database_reopen(self):
+        import time
+
+        box = self._outbox()
+        until = time.time() + 600
+        box.set_cooldown("id:1:qq:123", until)
+        box.close()
+        reopened = Outbox(box.path)
+        try:
+            self.assertEqual(reopened.cooldown_until("id:1:qq:123"), until)
+            self.assertEqual(reopened.cooldown_until("id:2:qq:123"), 0)
+            reopened.set_cooldown("id:1:qq:123", until - 60)
+            self.assertEqual(reopened.cooldown_until("id:1:qq:123"), until)
+        finally:
+            reopened.close()
+
+    def test_expired_cooldown_is_removed(self):
+        box = self._outbox()
+        box.set_cooldown("id:1:qq:123", 1)
+        self.assertEqual(box.cooldown_until("id:1:qq:123"), 0)
+        self.assertEqual(box._get_conn().execute("SELECT COUNT(*) FROM cooldowns").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

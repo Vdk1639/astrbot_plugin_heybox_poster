@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from .core.client import (
     RateLimited,
     XhhClient,
     XhhError,
+    account_key,
     build_post_form,
 )
 from .core.outbox import Outbox
@@ -32,7 +35,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.4.1",
+    "0.5.3",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -43,7 +46,17 @@ class XhhPosterPlugin(Star):
         self._last_post_at: dict[str, float] = {}
         self._outbox: Outbox | None = None
         self._locks: dict[str, asyncio.Lock] = {}
-        self._rate_limit_until: dict[str, float] = {}
+        self.web = None
+        if callable(getattr(context, "register_web_api", None)):
+            try:
+                from .core.web import AccountWebUI
+            except ModuleNotFoundError as exc:
+                if exc.name != "astrbot.api.web":
+                    raise
+                logger.warning(f"[{PLUGIN_NAME}] 当前 AstrBot 不支持插件账号页面，请升级")
+            else:
+                self.web = AccountWebUI(self)
+                self.web.register(context)
 
     # ------------------------------------------------------------------
     # 配置 / 客户端
@@ -138,6 +151,8 @@ class XhhPosterPlugin(Star):
             return Path(__file__).resolve().parent / "outbox.sqlite3"
 
     async def terminate(self) -> None:
+        if self.web is not None:
+            await self.web.close()
         if self._client is not None:
             await self._client.close()
             self._client = None
@@ -207,9 +222,12 @@ class XhhPosterPlugin(Star):
                 sender = str(event.get_sender_id())
             except Exception:
                 return False
-            return sender in allowed
+            return sender in allowed or self._sender(event) in allowed
 
-        # 默认仅管理员：优先官方 is_admin()，其次比对全局 admins_id
+        return self._is_admin(event)
+
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """登录入口只认管理员，不使用发帖白名单。"""
         try:
             if event.is_admin():
                 return True
@@ -230,10 +248,7 @@ class XhhPosterPlugin(Star):
         seconds = int(self._c("cooldown_seconds", 60) or 0)
         if seconds <= 0:
             return ""
-        try:
-            sender = str(event.get_sender_id())
-        except Exception:
-            sender = "unknown"
+        sender = self._sender(event)
         now = time.time()
         last = self._last_post_at.get(sender, 0)
         if now - last < seconds:
@@ -244,9 +259,18 @@ class XhhPosterPlugin(Star):
 
     def _sender(self, event: AstrMessageEvent) -> str:
         try:
-            return str(event.get_sender_id())
+            sender = str(event.get_sender_id())
         except Exception:
             return "unknown"
+        try:
+            platform = str(event.get_platform_name()).lower()
+        except Exception:
+            return sender
+        platform = {
+            "aiocqhttp": "qq", "qq_official": "qq",
+            "heybox": "xhh", "xiaoheihe": "xhh",
+        }.get(platform, platform)
+        return f"{platform}:{sender}"
 
     def _lock_for(self, sender: str) -> asyncio.Lock:
         lock = self._locks.get(sender)
@@ -256,11 +280,22 @@ class XhhPosterPlugin(Star):
         return lock
 
     def _rate_limit_seconds(self) -> int:
-        return max(0, int(self._c("rate_limit_cooldown_seconds", 600) or 600))
+        return max(0, int(self._c("rate_limit_cooldown_seconds", 600)))
+
+    def _rate_limit_key(self, sender: str, account: str = "") -> str:
+        account = account or account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
+        return f"{account}:{sender}"
+
+    def _record_rate_limit(self, sender: str, account: str = "") -> None:
+        seconds = self._rate_limit_seconds()
+        if seconds:
+            self._get_outbox().set_cooldown(self._rate_limit_key(sender, account), time.time() + seconds)
 
     def _rate_limit_block(self, sender: str) -> str:
         """命中限流后的本地冷却；返回空串表示不在冷却期。"""
-        until = self._rate_limit_until.get(sender, 0)
+        if not self._rate_limit_seconds():
+            return ""
+        until = self._get_outbox().cooldown_until(self._rate_limit_key(sender))
         if time.time() < until:
             wait = int(until - time.time()) + 1
             return f"刚触发限流，请 {wait} 秒后再试。"
@@ -294,6 +329,72 @@ class XhhPosterPlugin(Star):
     # ------------------------------------------------------------------
     # 手动指令
     # ------------------------------------------------------------------
+    @filter.command("xhh登录")
+    async def cmd_login(self, event: AstrMessageEvent):
+        """提示管理员从 Dashboard 进入账号管理页面。"""
+        if not self._is_admin(event):
+            yield event.plain_result("仅 AstrBot 管理员可以管理登录账号。")
+            return
+        yield event.plain_result(
+            "请登录 AstrBot WebUI → 插件 → 小黑盒发帖 → 可视化视图 → 账号管理，扫码登录或切换账号。"
+        )
+
+    def _save_login(self, cookie: str, status: dict) -> None:
+        from http.cookies import SimpleCookie
+
+        parsed = SimpleCookie(cookie)
+        if (not parsed.get("user_pkey") or not parsed["user_pkey"].value
+                or not parsed.get("x_xhh_tokenid") or not parsed["x_xhh_tokenid"].value
+                or not str(status.get("user_id") or "").isascii()
+                or not str(status.get("user_id") or "").isdigit()):
+            raise XhhError("登录凭据或账号 ID 无效，原登录态未替换")
+        values = {
+            "cookie": cookie, "user_pkey": parsed["user_pkey"].value,
+            "x_xhh_tokenid": parsed["x_xhh_tokenid"].value, "heybox_id": str(status["user_id"]),
+        }
+        self._save_credentials(values)
+
+    def _save_credentials(self, values: dict, *, backup: bool = True) -> None:
+        old = {key: self._c(key, "") for key in values}
+        save = getattr(self.config, "save_config", None)
+        if not callable(save):
+            raise XhhError("宿主不支持保存插件配置，原登录态未替换")
+        self._get_outbox()
+        # 提前检查客户端配置，避免凭据写入后才发现无法重建客户端。
+        float(self._c("request_timeout", 20) or 20)
+        backup_path = self._default_outbox_path().parent / "login_backup.json"
+        if backup and any(old.values()):
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=backup_path.parent, delete=False
+                ) as file:
+                    temporary = Path(file.name)
+                    json.dump(old, file, ensure_ascii=False)
+                temporary.replace(backup_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        self.config.update(values)
+        try:
+            save()
+        except Exception:
+            self.config.update(old)
+            try:
+                save()
+            except Exception:
+                logger.warning(f"[{PLUGIN_NAME}] 登录配置回滚失败，请检查配置文件权限")
+            raise XhhError("登录配置保存失败，内存中的原登录态已恢复") from None
+        if self._client is not None:
+            asyncio.create_task(self._client.close())
+            self._client = None
+        self._client_cookie = ""
+        if self._cookie():
+            self._get_client()
+        if not backup:
+            backup_path.unlink(missing_ok=True)
+
     @filter.command("xhh状态")
     async def cmd_status(self, event: AstrMessageEvent):
         """查看小黑盒登录态。"""
@@ -338,16 +439,19 @@ class XhhPosterPlugin(Star):
                 yield event.plain_result(wait)
                 return
 
+            rate_account = account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
+            dry_run = bool(self._c("dry_run", False))
             try:
+                client = None if dry_run else self._get_client()
                 topic_ids = await self._resolve_topics(topic)
                 view_limit = self._view_limit()
-                if self._c("dry_run", False):
+                if dry_run:
                     form = build_post_form(
                         title, text, topic_ids=topic_ids, view_limit=view_limit
                     )
                     yield event.plain_result(f"[dry-run] 将提交：{form}")
                     return
-                result = await self._get_client().publish(
+                result = await client.publish(
                     title,
                     text,
                     mode="dynamic",
@@ -364,9 +468,7 @@ class XhhPosterPlugin(Star):
                     )
             except Exception as exc:
                 if isinstance(exc, RateLimited):
-                    self._rate_limit_until[self._sender(event)] = (
-                        time.time() + self._rate_limit_seconds()
-                    )
+                    self._record_rate_limit(self._sender(event), rate_account)
                 self._log_error(exc)
                 yield event.plain_result(self._friendly_error(exc))
 
@@ -389,7 +491,7 @@ class XhhPosterPlugin(Star):
         if not topics:
             yield event.plain_result("没搜到相关话题。")
             return
-        lines = [f"{t['topic_id']}  {t['name']}" for t in topics[:10]]
+        lines = [f"{t['topic_id']}  {t['name']}" for t in topics[:5]]
         yield event.plain_result("话题 ID / 名称：\n" + "\n".join(lines))
 
     @filter.command("xhh删除")
@@ -448,7 +550,7 @@ class XhhPosterPlugin(Star):
 
     @filter.llm_tool(name="xhh_search_topics")
     async def tool_topics(self, event: AstrMessageEvent, keyword: str) -> str:
-        """按关键词搜索小黑盒社区/话题，发帖前用它确认 topic_id。
+        """按关键词搜索最多 5 个小黑盒社区/话题；发帖优先传明确的 topic_id。
 
         Args:
             keyword(string): 社区或话题名称关键词，例如 "Steam"、"黑神话"
@@ -460,7 +562,7 @@ class XhhPosterPlugin(Star):
         if not topics:
             return f"没有搜到与「{keyword}」相关的话题。"
         return "候选话题：\n" + "\n".join(
-            f"- {t['name']}（topic_id={t['topic_id']}）" for t in topics[:10]
+            f"- {t['name']}（topic_id={t['topic_id']}）" for t in topics[:5]
         )
 
     @filter.llm_tool(name="xhh_my_posts")
@@ -491,7 +593,7 @@ class XhhPosterPlugin(Star):
     ) -> str:
         """发布一条小黑盒帖子（默认发动态；也可发长文或存草稿）。
 
-        调用前请确认标题、正文已写好；话题必填，可用 xhh_search_topics 查 ID。
+        调用前请确认标题、正文已写好；话题必填，优先传 topic_ids，避免同名社区误选。
 
         Args:
             title(string): 标题，不超过 100 字
@@ -510,10 +612,13 @@ class XhhPosterPlugin(Star):
             wait = self._check_cooldown(event)
             if wait:
                 return wait
+            rate_account = account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
+            dry_run = bool(self._c("dry_run", False))
             try:
+                client = None if dry_run else self._get_client()
                 ids = await self._resolve_topics(topic, topic_ids)
                 view_limit = self._view_limit()
-                if self._c("dry_run", False):
+                if dry_run:
                     form = build_post_form(
                         title,
                         text,
@@ -523,7 +628,7 @@ class XhhPosterPlugin(Star):
                         view_limit=view_limit,
                     )
                     return f"[dry-run] 未真正提交，表单如下：{form}"
-                result = await self._get_client().publish(
+                result = await client.publish(
                     title,
                     text,
                     mode=mode,
@@ -533,9 +638,7 @@ class XhhPosterPlugin(Star):
                 )
             except Exception as exc:
                 if isinstance(exc, RateLimited):
-                    self._rate_limit_until[self._sender(event)] = (
-                        time.time() + self._rate_limit_seconds()
-                    )
+                    self._record_rate_limit(self._sender(event), rate_account)
                 self._log_error(exc)
                 return self._friendly_error(exc)
 
