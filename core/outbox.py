@@ -46,7 +46,27 @@ class Outbox:
             )
             """
         )
+        conn.execute("CREATE TABLE IF NOT EXISTS cooldowns (key TEXT PRIMARY KEY, until REAL NOT NULL)")
         conn.commit()
+
+    def set_cooldown(self, key: str, until: float) -> None:
+        conn = self._get_conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO cooldowns (key, until) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET until=MAX(cooldowns.until, excluded.until)",
+                (key, until),
+            )
+
+    def cooldown_until(self, key: str) -> float:
+        conn = self._get_conn()
+        row = conn.execute("SELECT until FROM cooldowns WHERE key=?", (key,)).fetchone()
+        if row and row[0] > time.time():
+            return float(row[0])
+        if row:
+            with conn:
+                conn.execute("DELETE FROM cooldowns WHERE key=? AND until<=?", (key, time.time()))
+        return 0.0
 
     def close(self) -> None:
         if self._conn is not None:

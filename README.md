@@ -12,16 +12,28 @@ AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册
 - 话题搜索解析，或直接指定话题 ID
 - 风控识别，命中 `show_captcha` 时提示更新 Cookie
 - 白名单、冷却时间、`dry_run` 预演
+- WebUI 账号管理、扫码登录及切换；凭据验证成功后自动保存
+- 限流冷却落盘，插件重载或进程重启后继续生效
 
 ## 安装
 
 1. 把整个 `astrbot_plugin_heybox_poster/` 目录放到 AstrBot 的 `data/plugins/` 下；
-2. 重启 AstrBot（或在 WebUI 插件页重载）；
-3. 打开插件配置，填入 cookie。
+2. 使用 AstrBot `>=4.24.2,<5`，安装插件的 `requirements.txt` 依赖并重启（或在 WebUI 插件页重载）；
+3. 登录 AstrBot WebUI → 插件 → 小黑盒发帖 → 可视化视图 → 账号管理，扫码登录。也可在插件配置手动填写 Cookie。
 
 升级到 v0.2.0 时，插件目录下旧的 `outbox.sqlite3` 会自动迁移到 AstrBot 插件数据目录，去重与对账记录保留。
 
 ### 获取 Cookie
+
+**优先使用内置账号管理页**：点击「获取 / 刷新二维码」，用小黑盒 App 扫码并确认。页面显示等待扫码、已扫码待确认、成功、取消或过期状态，后台每 2 秒检查一次，最长 120 秒；过期后手动刷新。
+
+当前插件使用一个发帖账号。再次扫码可以切换账号；只有取得 `user_pkey` 和 `x_xhh_tokenid`、验证账号 ID 后才覆盖配置并重建客户端，失败时保留原账号。页面可检查登录态、取消扫码和清除本插件的本地登录凭据；清除不会撤销小黑盒 App 或其他客户端的会话。
+
+页面及 API 要求已登录的 AstrBot Dashboard 会话，通过内置 bridge 调用，不额外开放端口，不返回 Cookie。`/xhh登录` 为管理员提供页面入口提示。
+
+覆盖前会在 AstrBot 插件数据目录保留一份 `login_backup.json`，每次覆盖替换上一份；清除登录态时删除备份。**插件配置和备份含明文登录凭据**，请限制数据目录的读取权限，勿分享或提交。备份不随自定义 `outbox_path` 移动。
+
+以下为手动导入 Cookie 的替代方式。
 
 发帖接口依赖两个值：
 
@@ -30,7 +42,7 @@ AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册
 
 三种拿法任选：
 
-**A. 用 xiaoheihe-cli（推荐，可扫码登录并自动维护）**
+**A. 用 xiaoheihe-cli（可扫码登录并自动维护）**
 
 ```bash
 uv tool install git+https://github.com/AaronZ345/xiaoheihe-cli.git
@@ -61,16 +73,18 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | `heybox_id` | string | 空 | 当前账号 ID，作为公共参数发送 |
 | `default_topic_ids` | string | 空 | 默认话题 ID（逗号分隔） |
 | `view_limit` | int | 2 | 可见范围：1 公开 / 2 粉丝可见 / 3 仅自己可见 |
-| `allowed_users` | list | [] | 允许发帖的发送者白名单；空 = 仅管理员 |
+| `allowed_users` | list | [] | 如 `qq:123`、`xhh:456`；裸 ID 兼容；空 = 仅管理员 |
 | `cooldown_seconds` | int | 60 | 同一用户两次发帖的最小间隔；0 = 不限制 |
 | `dry_run` | bool | true | 发帖只回显表单，删除只回显帖子 ID；不执行写操作 |
 | `request_timeout` | int | 20 | 单次请求超时（秒） |
 | `outbox_path` | string | 空 | 发帖 outbox 数据库路径；留空则用 AstrBot 插件数据目录 |
 | `outbox_dedup_seconds` | int | 600 | 同账号、同提交表单的成功发送去重窗口（秒）；未决任务持续阻止重发 |
-| `rate_limit_cooldown_seconds` | int | 600 | 命中限流后的本地冷却（秒） |
+| `rate_limit_cooldown_seconds` | int | 600 | 命中限流后按账号、平台发送者持久化冷却；0 禁用 |
 | `outbox_purge_days` | int | 7 | 启动时清理多少天前的 failed 记录 |
 
 `allowed_users` 的判定顺序：显式白名单 > 管理员（官方 `is_admin()` 优先，其次比对全局 `admins_id`）；无法确认权限时拒绝发帖和删除。
+
+例如 `["qq:123", "xhh:456"]` 只放行 QQ 用户 123 和小黑盒用户 456。兼容别名 `aiocqhttp` / `qq_official` → `qq`、`heybox` / `xiaoheihe` → `xhh`；其他平台使用 AstrBot 的平台名。裸 ID `123` 会匹配各平台上的同名 ID，需要隔离时使用前缀。发帖白名单不授予账号页面权限。
 
 发帖结果未知（网络中断、HTTP 5xx、响应异常）时保留 outbox 记录，禁止相同请求重发；重启时对账未知任务和中断遗留的 `pending`。无法确认的记录不会自动解除，请先人工核实帖子，勿盲目重试。草稿不会通过公开帖子列表认领。
 
@@ -83,18 +97,19 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | 工具 | 作用 |
 |---|---|
 | `xhh_account_status()` | 查登录态、昵称、heybox_id |
-| `xhh_search_topics(keyword)` | 搜社区/话题，拿 `topic_id` |
+| `xhh_search_topics(keyword)` | 搜社区/话题，最多返回 5 条，拿 `topic_id` |
 | `xhh_publish_post(title, text, topic, topic_ids, mode, draft)` | 发帖 / 存草稿 |
 | `xhh_my_posts(limit)` | 只读查询当前账号最近的帖子列表 |
 
 给模型的提示词里建议加一句：
 
-> 发小黑盒前先用 `xhh_search_topics` 确认社区，话题必填；正文控制在 1000 字内。
+> 发小黑盒时优先传明确的 `topic_ids`，未知时先用 `xhh_search_topics` 确认社区，避免同名社区误选；话题必填，正文控制在 1000 字内。
 
 ### 手动指令
 
 ```text
 /xhh状态
+/xhh登录
 /xhh话题 Steam
 /xhh发帖 标题|正文|Steam
 /xhh删除 <link_id>
@@ -110,10 +125,21 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | [AaronZ345/xiaoheihe-cli](https://github.com/AaronZ345/xiaoheihe-cli) | MIT（© 2025 Li Fangyu） | `hkey` 签名变换、Workshop `_rnd` 公式、发帖表单字段、话题搜索接口 |
 | [56dz/xiaoheihe-api](https://github.com/56dz/xiaoheihe-api) | GPL-3.0 | `hkey` 算法说明；`tests/` 中 6 组真实抓包签名向量（仅测试数据） |
 | [ylty1516/xiaoheihe-agent](https://github.com/ylty1516/xiaoheihe-agent) | MIT（`pyproject.toml` 声明，仓库未附 LICENSE 文件） | 长文必填字段与发帖踩坑记录 |
+| [674537331/astrbot_plugin_xiaoheihe_adapter](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter) | MIT（© 2026 RyanVaderAn） | WebUI 页面与 Dashboard 鉴权方式、扫码参数兼容参考，独立实现 |
 
 另评估但未采用代码：[wsmxd/XiaoheiheMcpServer](https://github.com/wsmxd/XiaoheiheMcpServer)（MIT，Playwright 方案）。
 
 第三方许可原文与引用范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+离线回归与未完成的实机验证、P3 待办见 [TODO.md](TODO.md)。
+
+本地检查（Python 3.12、Node.js 18+）：
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+node tests/test_account_page.mjs
+```
 
 ### 协议兼容性说明
 

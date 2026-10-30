@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>小黑盒发帖 · 账号管理</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main>
+    <h1>账号管理</h1>
+    <p>管理当前发帖账号。用小黑盒 App 扫码并确认，验证成功后自动保存并切换。</p>
+    <section aria-labelledby="account-title">
+      <h2 id="account-title">当前账号</h2>
+      <p id="account">正在读取…</p>
+      <button id="check" type="button">检查登录态</button>
+      <button id="logout" type="button" class="secondary">清除本地登录态</button>
+    </section>
+    <section aria-labelledby="qr-title">
+      <h2 id="qr-title">扫码登录 / 切换账号</h2>
+      <p id="status" role="status" aria-live="polite">尚未开始</p>
+      <img id="qr" width="256" height="256" alt="使用小黑盒 App 扫描此二维码登录" hidden>
+      <p id="expiry"></p>
+      <button id="start" type="button">获取 / 刷新二维码</button>
+      <button id="cancel" type="button" class="secondary">取消扫码</button>
+      <p class="note">二维码最长有效 120 秒，过期后请手动刷新。切换前会在插件数据目录保留一份旧凭据备份；清除登录态时一并删除备份，仅影响本插件。</p>
+    </section>
+    <p id="error" role="alert"></p>
+    <dialog id="logout-confirm" aria-labelledby="logout-title">
+      <form method="dialog">
+        <h2 id="logout-title">清除本地登录态？</h2>
+        <p>将清除本插件的当前凭据和旧账号备份，之后需重新扫码或填写 Cookie。</p>
+        <button value="cancel" class="secondary" autofocus>取消</button>
+        <button value="logout">确认清除</button>
+      </form>
+    </dialog>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

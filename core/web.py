@@ -1,0 +1,174 @@
+"""账号页面通过 AstrBot Dashboard 的认证桥接访问，不单独监听端口。"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import time
+
+from astrbot.api import logger
+from astrbot.api.web import error_response, json_response, request
+
+from .client import XhhClient, XhhError
+from .login import QrLoginClient
+
+
+class AccountWebUI:
+    def __init__(self, plugin):
+        self.plugin = plugin
+        self._lock = asyncio.Lock()
+        self._task = None
+        self._login = {"state": "idle"}
+        self._account = {}
+        self._closed = False
+
+    def register(self, context):
+        for path, handler, method in (
+            ("auth/status", self.status, "GET"),
+            ("auth/qr", self.qr, "POST"),
+            ("auth/cancel", self.cancel, "POST"),
+            ("auth/check", self.check, "POST"),
+            ("auth/logout", self.logout, "POST"),
+        ):
+            context.register_web_api(
+                f"/astrbot_plugin_heybox_poster/{path}", handler, [method], "小黑盒发帖账号管理"
+            )
+
+    @staticmethod
+    def _unauthorized():
+        if not request.username:
+            return error_response("请先登录 AstrBot Dashboard", status_code=401)
+        return None
+
+    def _snapshot(self):
+        return {
+            "login": dict(self._login),
+            "account": {
+                "has_credentials": bool(self.plugin._cookie()),
+                "user_id": str(self.plugin._c("heybox_id", "")),
+                **self._account,
+            },
+        }
+
+    async def status(self):
+        if response := self._unauthorized():
+            return response
+        return json_response(self._snapshot())
+
+    async def qr(self):
+        if response := self._unauthorized():
+            return response
+        async with self._lock:
+            if self._closed:
+                return error_response("插件正在卸载，请刷新后重试", status_code=503)
+            await self._stop()
+            client = QrLoginClient(timeout=float(self.plugin._c("request_timeout", 20) or 20))
+            self._login = {"state": "requesting"}
+            try:
+                async with asyncio.timeout(20):
+                    ticket = await client.ticket()
+                import qrcode
+
+                image = io.BytesIO()
+                qrcode.make(ticket["url"]).save(image, format="PNG")
+                self._login = {
+                    "state": "wait", "expires_at": time.time() + ticket["expire"],
+                    "qr_image": "data:image/png;base64," + base64.b64encode(image.getvalue()).decode("ascii"),
+                }
+                self._task = asyncio.create_task(self._poll(client, ticket))
+            except BaseException as exc:
+                self._login = {"state": "failed"}
+                await client.close()
+                if not isinstance(exc, Exception):
+                    raise
+                logger.warning(f"[heybox_poster] 获取二维码失败：{type(exc).__name__}")
+                return error_response("获取二维码失败，请重试或检查依赖及网络", status_code=502)
+            return json_response(self._snapshot())
+
+    async def _poll(self, client, ticket):
+        try:
+            async with asyncio.timeout(ticket["expire"]):
+                while True:
+                    await asyncio.sleep(2)
+                    state = await client.poll(ticket["params"])
+                    if state in ("wait", "scanned"):
+                        self._login["state"] = state
+                        continue
+                    if state in ("expired", "canceled"):
+                        self._login = {"state": state}
+                        return
+                    cookie = client.login_cookie()
+                    async with XhhClient(cookie, timeout=client.timeout) as authenticated:
+                        status = await authenticated.account_status()
+                    if not status.get("logged_in") or not status.get("user_id"):
+                        raise XhhError("扫码后的登录态验证失败")
+                    self.plugin._save_login(cookie, status)
+                    self._account = {"logged_in": True, "nickname": status.get("nickname", "")}
+                    self._login = {"state": "success"}
+                    return
+        except TimeoutError:
+            self._login = {"state": "expired"}
+        except asyncio.CancelledError:
+            self._login = {"state": "canceled"}
+            raise
+        except Exception as exc:
+            logger.warning(f"[heybox_poster] 扫码登录失败：{type(exc).__name__}")
+            self._login = {"state": "failed"}
+        finally:
+            await client.close()
+
+    async def close(self):
+        async with self._lock:
+            self._closed = True
+            await self._stop()
+
+    async def _stop(self):
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+            if self._login["state"] in ("requesting", "wait", "scanned"):
+                self._login = {"state": "canceled"}
+
+    async def cancel(self):
+        if response := self._unauthorized():
+            return response
+        async with self._lock:
+            await self._stop()
+            self._login = {"state": "canceled"}
+            return json_response(self._snapshot())
+
+    async def check(self):
+        if response := self._unauthorized():
+            return response
+        async with self._lock:
+            try:
+                if not self.plugin._cookie():
+                    self._account = {"logged_in": False}
+                else:
+                    # 使用独立实例，防止检查旧账号的返回值覆盖正在切换的新账号。
+                    cookie = self.plugin._cookie()
+                    async with XhhClient(cookie) as client:
+                        status = await client.account_status()
+                    if cookie == self.plugin._cookie():
+                        self._account = {key: status[key] for key in ("logged_in", "nickname", "user_id") if key in status}
+            except Exception:
+                return error_response("检查失败，请确认网络后重试", status_code=502)
+            return json_response(self._snapshot())
+
+    async def logout(self):
+        if response := self._unauthorized():
+            return response
+        async with self._lock:
+            await self._stop()
+            try:
+                self.plugin._save_credentials(dict.fromkeys(("cookie", "user_pkey", "x_xhh_tokenid", "heybox_id"), ""), backup=False)
+            except Exception:
+                return error_response("清除配置失败，请检查插件配置文件权限", status_code=500)
+            self._account = {"logged_in": False}
+            self._login = {"state": "idle"}
+            return json_response(self._snapshot())

@@ -51,6 +51,7 @@ SOFTWARE.
 |---|---|---|
 | [ylty1516/xiaoheihe-agent](https://github.com/ylty1516/xiaoheihe-agent) | MIT（`pyproject.toml` 声明；仓库未附 LICENSE 文件） | 长文必填字段与发帖踩坑记录 |
 | [wsmxd/XiaoheiheMcpServer](https://github.com/wsmxd/XiaoheiheMcpServer) | MIT（© 2026 wsmxd） | 仅作 Playwright 方案对比，未采用代码 |
+| [674537331/astrbot_plugin_xiaoheihe_adapter](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter) | MIT（© 2026 RyanVaderAn） | 参考其 `pages/` + `register_web_api` + Dashboard 认证流程以及 `qr` / `qr_ticket` 参数形态；页面、状态管理和测试独立实现，未复制代码 |
 
 ## 平台说明
 

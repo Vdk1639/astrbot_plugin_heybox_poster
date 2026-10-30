@@ -1,6 +1,6 @@
 {
   "cookie": {
-    "description": "完整 Cookie 串，必须含 user_pkey（登录态）与 x_xhh_tokenid（风控）。留空则用下面的 user_pkey / x_xhh_tokenid 拼接。",
+    "description": "可在插件可视化视图的账号管理页扫码自动保存。也可手动填写完整 Cookie，需含 user_pkey 与 x_xhh_tokenid；留空用下方两个字段拼接。",
     "type": "string",
     "default": ""
   },
@@ -41,7 +41,7 @@
     "hint": "1 公开可见，2 粉丝可见，3 仅自己可见。首次测试建议用粉丝可见或仅自己可见"
   },
   "allowed_users": {
-    "description": "允许发帖和删除的发送者 ID 白名单；留空仅限 AstrBot 管理员，无法确认管理员身份时拒绝写操作",
+    "description": "允许发帖和删除的发送者白名单，支持 qq:123 / xhh:456；裸 ID 兼容当前平台。留空仅限 AstrBot 管理员，身份不明时拒绝写操作。账号页面由 Dashboard 登录鉴权。",
     "type": "list",
     "default": []
   },
@@ -61,7 +61,7 @@
     "default": 20
   },
   "outbox_path": {
-    "description": "发帖 outbox 数据库路径；留空则使用插件目录下的 outbox.sqlite3",
+    "description": "发帖 outbox 数据库路径；留空则使用 AstrBot 插件数据目录下的 outbox.sqlite3",
     "type": "string",
     "default": ""
   },
@@ -71,7 +71,7 @@
     "default": 600
   },
   "rate_limit_cooldown_seconds": {
-    "description": "命中限流后的本地冷却时间（秒），期间直接拒绝发帖",
+    "description": "命中限流后的本地冷却时间（秒），按账号及平台发送者持久化，重启后仍生效；0 禁用",
     "type": "int",
     "default": 600
   },
