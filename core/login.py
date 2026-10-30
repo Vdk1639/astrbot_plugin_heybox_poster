@@ -26,6 +26,10 @@ class QrLoginClient(XhhClient):
         self.nickname = ""
         self._token_id = ""
 
+    def _build_url(self, path: str, params: dict | None, write: bool) -> str:
+        # 扫码属于网页登录；app=heybox 会生成不同客户端的二维码会话。
+        return super()._build_url(path, {"app": "web", **(params or {})}, write)
+
     async def ticket(self) -> dict:
         path = "/account/get_qrcode_url/"
         result = self._unwrap(await self.request("GET", path), path)

@@ -8,3 +8,4 @@ venv/
 .ruff_cache/
 outbox.sqlite3*
 login_backup.json
+.qr-debug/

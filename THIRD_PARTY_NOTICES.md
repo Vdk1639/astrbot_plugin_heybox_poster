@@ -50,6 +50,8 @@ SOFTWARE.
 `core/login.py` 参考其扫码状态、JSON 凭据解析与轮询方案，客户端标识生成公式
 改编自其 `xiaoheihe/request_signing.py`。保留完整许可：
 
+`debug_qr.py` 的对照模式采用其 GET 公共参数与请求头；网络传输、诊断记录和凭据检查复用本项目现有客户端。
+
 ```text
 MIT License
 

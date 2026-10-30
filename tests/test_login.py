@@ -15,6 +15,28 @@ from astrbot_plugin_heybox_poster.core.login import QrLoginClient
 
 
 class LoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qr_ticket_and_poll_use_web_app_without_changing_post_client(self):
+        client = QrLoginClient()
+        calls = []
+
+        def server(method, url, form):
+            calls.append(url)
+            if urllib.parse.urlsplit(url).path == "/account/get_qrcode_url/":
+                return {"status": "ok", "result": {
+                    "qr_url": "https://api.xiaoheihe.cn/account/qr_login/?qr=test&app=web", "expire": 120,
+                }}
+            return {"status": "ok", "result": {"error": "ready"}}
+
+        with mock.patch.object(client, "_request_sync", side_effect=server):
+            ticket = await client.ticket()
+            self.assertEqual(await client.poll(ticket["params"]), "scanned")
+        for url in calls:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            self.assertEqual(query["app"], ["web"])
+            self.assertTrue(query["hkey"])
+        post_url = XhhClient("user_pkey=test")._build_url("/bbs/app/api/link/post", {}, True)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(post_url).query)["app"], ["heybox"])
+
     async def test_ticket_preserves_both_supported_poll_query_shapes(self):
         for query in ("qr=test&app=heybox", "qr_ticket=test&device=web&session=opaque&empty="):
             with self.subTest(query=query):
