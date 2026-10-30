@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import pathlib
+import json
 import sys
+import threading
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -36,6 +39,50 @@ class OutboxTests(unittest.TestCase):
         dup = box.mark_pending("fp1", {"title": "标题"})
         self.assertTrue(dup["duplicate"])
         self.assertEqual(dup["link_id"], "123")
+
+    def test_unresolved_attempt_cannot_be_overwritten(self):
+        for status in ("pending", "send_unknown"):
+            with self.subTest(status=status):
+                box = self._outbox()
+                box.mark_pending("fp", {"title": "original"})
+                if status == "send_unknown":
+                    box.mark_unknown("fp")
+                result = box.mark_pending("fp", {"title": "replacement"})
+                self.assertTrue(result["blocked"])
+                row = box._get_conn().execute(
+                    "SELECT status, payload FROM outbox WHERE fingerprint='fp'"
+                ).fetchone()
+                self.assertEqual(row[0], status)
+                self.assertEqual(json.loads(row[1]), {"title": "original"})
+
+    def test_separate_connections_reserve_only_once(self):
+        box = self._outbox()
+        barrier = threading.Barrier(2)
+
+        def reserve():
+            connection = Outbox(box.path)
+            try:
+                barrier.wait(timeout=5)
+                return connection.mark_pending("fp", {"title": "same"})
+            finally:
+                connection.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: reserve(), range(2)))
+        self.assertEqual(sum(bool(result.get("blocked")) for result in results), 1)
+
+    def test_retry_clears_previous_link_id(self):
+        box = self._outbox()
+        box.dedup_seconds = 0
+        box.mark_pending("fp", {})
+        box.mark_sent("fp", "old")
+        box.mark_pending("fp", {})
+        self.assertEqual(box.remove_by_link_id("old"), 0)
+
+    def test_interrupted_pending_is_available_for_reconciliation(self):
+        box = self._outbox()
+        box.mark_pending("fp", {"title": "interrupted"})
+        self.assertEqual(box.unknown_rows(), [("fp", '{"title": "interrupted"}')])
 
     def test_unknown_rows(self):
         box = self._outbox()

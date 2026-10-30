@@ -53,31 +53,48 @@ class Outbox:
             self._conn.close()
             self._conn = None
 
-    def mark_pending(self, fingerprint: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """发送前登记；同一指纹在去重窗口内已 ``sent`` 则直接返回重复标记。"""
+    def mark_pending(
+        self, fingerprint: str, payload: dict[str, Any], *, legacy_fingerprint: str = ""
+    ) -> dict[str, Any]:
+        """原子登记；未决任务阻止重发，成功任务按去重窗口拦截。"""
         conn = self._get_conn()
         now = time.time()
-        row = conn.execute(
-            "SELECT status, link_id, updated_at FROM outbox WHERE fingerprint=?",
-            (fingerprint,),
-        ).fetchone()
-        # 以 updated_at 为基准：mark_sent 会刷新它，避免窗口过期后
-        # created_at 停留不动导致同内容可无限重发。
-        if row and row[0] == "sent" and (now - row[2]) < self.dedup_seconds:
-            return {"duplicate": True, "link_id": row[1]}
-        conn.execute(
-            """
-            INSERT INTO outbox
-                (fingerprint, payload, status, link_id, created_at, updated_at)
-            VALUES (?, ?, 'pending', '', ?, ?)
-            ON CONFLICT(fingerprint) DO UPDATE SET
-                payload=excluded.payload,
-                status=excluded.status,
-                updated_at=excluded.updated_at
-            """,
-            (fingerprint, json.dumps(payload, ensure_ascii=False), now, now),
-        )
-        conn.commit()
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if legacy_fingerprint:
+                legacy = conn.execute(
+                    "SELECT payload FROM outbox WHERE fingerprint=?", (legacy_fingerprint,)
+                ).fetchone()
+                if legacy:
+                    meta = json.loads(legacy[0])
+                    # 旧记录没有账号信息，按相同表单保守继承，避免升级后重发。
+                    if meta.get("form") == payload.get("form"):
+                        meta["account"] = payload["account"]
+                        conn.execute(
+                            "UPDATE OR IGNORE outbox SET fingerprint=?, payload=? WHERE fingerprint=?",
+                            (fingerprint, json.dumps(meta, ensure_ascii=False), legacy_fingerprint),
+                        )
+            row = conn.execute(
+                "SELECT status, link_id, updated_at FROM outbox WHERE fingerprint=?",
+                (fingerprint,),
+            ).fetchone()
+            if row and row[0] in ("pending", "send_unknown"):
+                return {"duplicate": False, "blocked": True, "link_id": row[1]}
+            if row and row[0] == "sent" and (now - row[2]) < self.dedup_seconds:
+                return {"duplicate": True, "link_id": row[1]}
+            conn.execute(
+                """
+                INSERT INTO outbox
+                    (fingerprint, payload, status, link_id, created_at, updated_at)
+                VALUES (?, ?, 'pending', '', ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    payload=excluded.payload,
+                    status=excluded.status,
+                    link_id='',
+                    updated_at=excluded.updated_at
+                """,
+                (fingerprint, json.dumps(payload, ensure_ascii=False), now, now),
+            )
         return {"duplicate": False, "link_id": ""}
 
     def mark_sent(self, fingerprint: str, link_id: str) -> None:
@@ -106,11 +123,11 @@ class Outbox:
         conn.commit()
 
     def unknown_rows(self) -> list[tuple[str, str]]:
-        """返回所有 ``send_unknown`` 的 ``(fingerprint, payload_json)``。"""
+        """返回待对账记录，包括进程中断后遗留的 ``pending``。"""
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT fingerprint, payload FROM outbox "
-            "WHERE status='send_unknown' ORDER BY created_at ASC"
+            "WHERE status IN ('pending', 'send_unknown') ORDER BY created_at ASC"
         ).fetchall()
         return [(str(r[0]), str(r[1])) for r in rows]
 

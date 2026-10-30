@@ -32,7 +32,7 @@ PLUGIN_NAME = "astrbot_plugin_heybox_poster"
     PLUGIN_NAME,
     "Vdk1639",
     "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
-    "0.4.0",
+    "0.4.1",
 )
 class XhhPosterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -79,9 +79,11 @@ class XhhPosterPlugin(Star):
 
     def _get_client(self) -> XhhClient:
         cookie = self._cookie()
+        heybox_id = str(self._c("heybox_id", "") or "").strip()
         if not cookie:
             raise XhhError("还没有配置 cookie：请在插件配置里填 cookie（或 user_pkey + x_xhh_tokenid）")
-        if self._client is None or cookie != self._client_cookie:
+        if (self._client is None or cookie != self._client_cookie
+                or heybox_id != self._client.heybox_id):
             if self._client is not None:
                 # 旧客户端交给事件循环回收，这里不阻塞
                 try:
@@ -90,7 +92,7 @@ class XhhPosterPlugin(Star):
                     pass
             self._client = XhhClient(
                 cookie,
-                heybox_id=str(self._c("heybox_id", "") or ""),
+                heybox_id=heybox_id,
                 timeout=float(self._c("request_timeout", 20) or 20),
                 outbox=self._get_outbox(),
             )
@@ -222,8 +224,7 @@ class XhhPosterPlugin(Star):
                 return False
             return sender in admins
 
-        # 既没配白名单，也拿不到管理员判定依据：为防锁死回退为允许
-        return True
+        return False
 
     def _check_cooldown(self, event: AstrMessageEvent) -> str:
         seconds = int(self._c("cooldown_seconds", 60) or 0)
@@ -272,7 +273,7 @@ class XhhPosterPlugin(Star):
         if isinstance(exc, RateLimited):
             return str(exc)
         if isinstance(exc, NetworkError):
-            return f"发送结果未知（网络中断或超时）：{exc}。已记录待对账，请勿重复发送。"
+            return f"发送结果未知（网络或服务端响应异常）：{exc}。请先核实结果，勿重复发送。"
         if isinstance(exc, XhhError):
             if exc.status in {"login", "relogin", "expired"}:
                 return "登录态失效，请重新配置 cookie。"
@@ -313,7 +314,7 @@ class XhhPosterPlugin(Star):
     async def cmd_post(self, event: AstrMessageEvent):
         """手动发帖：/xhh发帖 标题|正文|话题名或ID"""
         if not self._is_allowed(event):
-            yield event.plain_result("你没有发帖权限。")
+            yield event.plain_result("你没有发帖权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。")
             return
         raw = event.message_str.strip()
         for prefix in ("/xhh发帖", "xhh发帖"):
@@ -395,7 +396,7 @@ class XhhPosterPlugin(Star):
     async def cmd_delete(self, event: AstrMessageEvent):
         """删除帖子：/xhh删除 <link_id>（仅白名单用户）。"""
         if not self._is_allowed(event):
-            yield event.plain_result("你没有删除权限。")
+            yield event.plain_result("你没有删除权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。")
             return
         raw = event.message_str.strip()
         for prefix in ("/xhh删除", "xhh删除"):
@@ -405,6 +406,9 @@ class XhhPosterPlugin(Star):
         link_id = raw.strip()
         if not link_id:
             yield event.plain_result("用法：/xhh删除 <link_id>")
+            return
+        if self._c("dry_run", False):
+            yield event.plain_result(f"[dry-run] 未真正删除，link_id={link_id}")
             return
         try:
             result = await self._get_client().delete_link(link_id)
@@ -498,7 +502,7 @@ class XhhPosterPlugin(Star):
             draft(boolean): 为 true 时只存草稿，不公开发布
         """
         if not self._is_allowed(event):
-            return "当前用户没有发帖权限。"
+            return "当前用户没有发帖权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。"
         async with self._lock_for(self._sender(event)):
             block = self._rate_limit_block(self._sender(event))
             if block:

@@ -2,7 +2,7 @@
 
 AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册成 LLM 函数工具，同时保留手动指令。
 
-> ⚠️ **安全提示**：`allowed_users` 留空时**仅 AstrBot 管理员**可发帖（管理员由 AstrBot 全局 `admins_id` 判定）；显式填写后则只允许白名单内的用户。若 AstrBot 未配置管理员，插件为避免把你锁死会回退为不限制，请务必先配置好管理员或白名单。
+> ⚠️ **安全提示**：`allowed_users` 留空时**仅 AstrBot 管理员**可发帖或删除（管理员由 AstrBot 全局 `admins_id` 判定）；显式填写后则只允许白名单内的用户。无法确认管理员身份时拒绝写操作，请先配置好管理员或白名单。
 
 ## 特性
 
@@ -63,14 +63,18 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | `view_limit` | int | 2 | 可见范围：1 公开 / 2 粉丝可见 / 3 仅自己可见 |
 | `allowed_users` | list | [] | 允许发帖的发送者白名单；空 = 仅管理员 |
 | `cooldown_seconds` | int | 60 | 同一用户两次发帖的最小间隔；0 = 不限制 |
-| `dry_run` | bool | true | 只回显表单、不真正提交；首次部署建议保持开启 |
+| `dry_run` | bool | true | 发帖只回显表单，删除只回显帖子 ID；不执行写操作 |
 | `request_timeout` | int | 20 | 单次请求超时（秒） |
 | `outbox_path` | string | 空 | 发帖 outbox 数据库路径；留空则用 AstrBot 插件数据目录 |
-| `outbox_dedup_seconds` | int | 600 | 相同内容去重窗口（秒） |
+| `outbox_dedup_seconds` | int | 600 | 同账号、同提交表单的成功发送去重窗口（秒）；未决任务持续阻止重发 |
 | `rate_limit_cooldown_seconds` | int | 600 | 命中限流后的本地冷却（秒） |
 | `outbox_purge_days` | int | 7 | 启动时清理多少天前的 failed 记录 |
 
-`allowed_users` 的判定顺序：显式白名单 > 管理员（官方 `is_admin()` 优先，其次比对全局 `admins_id`）；两者都拿不到时回退为允许，避免把所有者锁死。
+`allowed_users` 的判定顺序：显式白名单 > 管理员（官方 `is_admin()` 优先，其次比对全局 `admins_id`）；无法确认权限时拒绝发帖和删除。
+
+发帖结果未知（网络中断、HTTP 5xx、响应异常）时保留 outbox 记录，禁止相同请求重发；重启时对账未知任务和中断遗留的 `pending`。无法确认的记录不会自动解除，请先人工核实帖子，勿盲目重试。草稿不会通过公开帖子列表认领。
+
+去重按账号和完整表单区分草稿、正式发布、话题、类型及可见范围。填写 `heybox_id` 时用它标识账号；留空时使用 `user_pkey` 的散列，重新登录更换 `user_pkey` 后无法延续该账号标识，建议固定配置 `heybox_id`。升级前的记录没有账号信息，相同表单会保守继承到当前账号；升级时请保持原账号配置。
 
 ## 使用
 

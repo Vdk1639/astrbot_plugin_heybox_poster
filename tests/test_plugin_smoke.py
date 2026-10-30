@@ -12,6 +12,7 @@ import sys
 import time
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -110,6 +111,20 @@ class PluginSmokeTests(unittest.TestCase):
         plugin = self._plugin(cookie="", user_pkey="p", x_xhh_tokenid="t")
         self.assertEqual(plugin._cookie(), "user_pkey=p; x_xhh_tokenid=t")
 
+    def test_account_config_change_rebuilds_client(self):
+        plugin = self._plugin()
+        plugin._get_outbox = lambda: None
+
+        async def run():
+            first = plugin._get_client()
+            plugin.config["heybox_id"] = "2"
+            second = plugin._get_client()
+            self.assertIsNot(first, second)
+            self.assertNotEqual(first._account_key, second._account_key)
+            await plugin.terminate()
+
+        asyncio.run(run())
+
     def test_whitelist(self):
         plugin = self._plugin(allowed_users=["10001"])
         from astrbot.api.event import AstrMessageEvent
@@ -131,11 +146,58 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertTrue(plugin._is_allowed(AstrMessageEvent("10001")))
         self.assertFalse(plugin._is_allowed(AstrMessageEvent("20002")))
 
-    def test_empty_whitelist_falls_back_open_when_no_admin_source(self):
+    def test_empty_whitelist_denies_when_no_admin_source(self):
         plugin = self._plugin()
         from astrbot.api.event import AstrMessageEvent
 
-        self.assertTrue(plugin._is_allowed(AstrMessageEvent("anyone")))
+        self.assertFalse(plugin._is_allowed(AstrMessageEvent("anyone")))
+
+    def test_admin_lookup_failure_denies_access(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin(context=mock.Mock())
+        plugin.context.get_config.side_effect = RuntimeError("unavailable")
+        event = AstrMessageEvent("anyone")
+        event.is_admin = mock.Mock(side_effect=RuntimeError("unavailable"))
+        self.assertFalse(plugin._is_allowed(event))
+
+    def test_delete_obeys_dry_run(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                plugin = self._plugin(allowed_users=["10001"], dry_run=dry_run)
+                client = mock.Mock(delete_link=mock.AsyncMock(return_value={}))
+                plugin._get_client = mock.Mock(return_value=client)
+                event = AstrMessageEvent("10001", "/xhh删除 123")
+                event.plain_result = str
+
+                async def run():
+                    return [reply async for reply in plugin.cmd_delete(event)]
+
+                replies = asyncio.run(run())
+                if dry_run:
+                    plugin._get_client.assert_not_called()
+                    self.assertIn("dry-run", replies[0])
+                else:
+                    client.delete_link.assert_awaited_once_with("123")
+
+    def test_missing_admin_denies_write_entrypoints(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin()
+        plugin._get_client = mock.Mock(side_effect=AssertionError("must not send"))
+        event = AstrMessageEvent("outsider", "/xhh删除 123")
+        event.plain_result = str
+
+        async def run():
+            self.assertIn("权限", await plugin.tool_publish(event, "标题", "正文", topic_ids="43"))
+            for command in (plugin.cmd_post, plugin.cmd_delete):
+                replies = [reply async for reply in command(event)]
+                self.assertIn("权限", replies[0])
+
+        asyncio.run(run())
+        plugin._get_client.assert_not_called()
 
     def test_cooldown(self):
         plugin = self._plugin(cooldown_seconds=60)
@@ -173,7 +235,7 @@ class PluginSmokeTests(unittest.TestCase):
         from astrbot.api.event import AstrMessageEvent
 
         plugin = self._plugin()
-        event = AstrMessageEvent("10001")
+        event = AstrMessageEvent("10001", role="admin")
 
         class FailingClient:
             async def publish(self, *args, **kwargs):

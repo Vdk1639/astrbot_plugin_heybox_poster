@@ -17,6 +17,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import HTTPException
+from http.cookies import SimpleCookie
 from typing import Any
 
 from .sign import signed_params, workshop_rnd
@@ -68,13 +70,13 @@ class RateLimited(XhhError):
 
 
 class NetworkError(XhhError):
-    """网络连接 / 超时错误，发帖结果未知，需要走 outbox 对账。"""
+    """网络或响应异常，写操作结果未知，需要核实。"""
 
 
-def content_fingerprint(title: str, content: str) -> str:
-    """发帖内容的幂等指纹：``标题 + 换行 + 正文`` 的 SHA-1。"""
-    material = f"{(title or '').strip()}\n{(content or '').strip()}"
-    return hashlib.sha1(material.encode("utf-8")).hexdigest()
+def content_fingerprint(account: str, form: dict[str, str]) -> str:
+    """按账号和实际提交表单去重，区分草稿、话题及可见范围。"""
+    material = json.dumps([account, form], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def build_post_form(
@@ -141,6 +143,12 @@ class XhhClient:
         self.timeout = float(timeout)
         self.base = base.rstrip("/")
         self.outbox = outbox
+        pkey = SimpleCookie(self.cookie).get("user_pkey")
+        # shortcut: 未配置账号 ID 时依赖登录凭据，需跨重新登录去重时配置 heybox_id。
+        self._account_key = (
+            "id:" + self.heybox_id if self.heybox_id else
+            "session:" + hashlib.sha256((pkey.value if pkey else self.cookie).encode("utf-8")).hexdigest()
+        )
 
     # ------------------------------------------------------------------
     @property
@@ -186,20 +194,26 @@ class XhhClient:
 
         req = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                code, raw = resp.status, resp.read()
-        except urllib.error.HTTPError as exc:
-            code, raw = exc.code, exc.read()
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    code, raw = resp.status, resp.read()
+            except urllib.error.HTTPError as exc:
+                code, raw = exc.code, exc.read()
+        except (urllib.error.URLError, TimeoutError, OSError, HTTPException) as exc:
             raise NetworkError(f"请求失败：{type(exc).__name__}: {exc}") from exc
 
         text = raw.decode("utf-8", "replace")
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise XhhError(f"响应不是 JSON（HTTP {code}）：{text[:200]}") from exc
+            raise NetworkError(f"响应不是 JSON（HTTP {code}），无法确认结果") from exc
+        if not isinstance(payload, dict):
+            raise NetworkError(f"响应结构异常（HTTP {code}），无法确认结果")
         if code >= 500:
-            raise XhhError(f"服务端错误 HTTP {code}", payload=payload)
+            raise NetworkError(f"服务端错误 HTTP {code}，无法确认结果", payload=payload)
+        if code >= 400:
+            self._unwrap(payload, urllib.parse.urlsplit(url).path)
+            raise XhhError(f"请求被拒绝 HTTP {code}", payload=payload)
         return payload
 
     async def request(
@@ -221,9 +235,9 @@ class XhhClient:
 
     # ------------------------------------------------------------------
     def _unwrap(self, payload: dict, path: str) -> dict:
+        if not isinstance(payload, dict) or not isinstance(payload.get("status"), str):
+            raise NetworkError("响应缺少有效业务状态，无法确认结果", path=path)
         status = payload.get("status")
-        if status is None:
-            return payload
         if status == "show_captcha":
             raise CaptchaRequired(
                 "触发风控验证码：cookie 里的 x_xhh_tokenid 缺失或已失效",
@@ -241,10 +255,12 @@ class XhhClient:
             raise XhhError((msg or f"status={status}") + hint,
                            status=status, path=path, payload=payload)
         if status != "ok":
-            raise XhhError(payload.get("msg") or f"status={status}",
-                           status=status, path=path, payload=payload)
-        result = payload.get("result")
-        return result if isinstance(result, dict) else {}
+            raise NetworkError(f"未知业务状态：{status}，无法确认结果",
+                               status=status, path=path, payload=payload)
+        result = payload.get("result", {})
+        if not isinstance(result, dict):
+            raise NetworkError("响应 result 结构异常，无法确认结果", path=path)
+        return result
 
     # ------------------------------------------------------------------
     async def account_status(self) -> dict:
@@ -312,7 +328,7 @@ class XhhClient:
             desc=desc,
             view_limit=view_limit,
         )
-        fingerprint = content_fingerprint(title, content)
+        fingerprint = content_fingerprint(self._account_key, form)
         posted_at = time.time()
         baseline_ids: set[str] = set()
         if not draft:
@@ -327,13 +343,19 @@ class XhhClient:
             dedup = self.outbox.mark_pending(
                 fingerprint,
                 {
+                    "account": self._account_key,
                     "form": form,
                     "title": title,
                     "content": content,
                     "baseline_ids": sorted(baseline_ids),
                     "posted_at": posted_at,
                 },
+                legacy_fingerprint=hashlib.sha1(
+                    f"{title.strip()}\n{content.strip()}".encode("utf-8")
+                ).hexdigest(),
             )
+            if dedup.get("blocked"):
+                raise XhhError("相同请求仍在发送或结果待对账，请先核实，勿重复发送。")
             if dedup["duplicate"]:
                 return {
                     "link_id": dedup["link_id"],
@@ -346,17 +368,19 @@ class XhhClient:
         try:
             payload = await self.request("POST", path, form=form, write=True)
             result = self._unwrap(payload, path)
-        except NetworkError:
+        except BaseException as exc:
             if self.outbox is not None:
-                self.outbox.mark_unknown(fingerprint)
-            raise
-        except Exception:
-            if self.outbox is not None:
-                self.outbox.mark_failed(fingerprint)
+                # 仅明确业务拒绝可重试；取消或未知异常都保留待对账。
+                if isinstance(exc, XhhError) and not isinstance(exc, NetworkError):
+                    self.outbox.mark_failed(fingerprint)
+                else:
+                    self.outbox.mark_unknown(fingerprint)
             raise
         link_id = str(result.get("link_id") or result.get("linkid") or "")
         if not link_id and not draft:
-            # 服务端不回 link_id 时，只在「发帖前基线之外的新条目」里认领。
+            # 先保存未知状态，避免回查途中取消任务后留下不可恢复的记录。
+            if self.outbox is not None:
+                self.outbox.mark_unknown(fingerprint)
             link_id = await self._reconcile_link_id(title, baseline_ids, posted_at)
         if self.outbox is not None:
             if link_id:
@@ -372,7 +396,7 @@ class XhhClient:
         }
 
     async def reconcile_outbox(self) -> int:
-        """把 ``send_unknown`` 的帖子与「我的帖子列表」对账，命中即认领。"""
+        """把未知或中断的发送与「我的帖子列表」对账，命中即认领。"""
         if self.outbox is None:
             return 0
         claimed = 0
@@ -380,6 +404,10 @@ class XhhClient:
             try:
                 meta = json.loads(payload_json)
             except Exception:
+                continue
+            if meta.get("account") not in (None, self._account_key):
+                continue
+            if (meta.get("form") or {}).get("draft") == "1":
                 continue
             link_id = await self._reconcile_link_id(
                 str(meta.get("title") or ""),

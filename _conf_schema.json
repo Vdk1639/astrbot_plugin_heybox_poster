@@ -41,7 +41,7 @@
     "hint": "1 公开可见，2 粉丝可见，3 仅自己可见。首次测试建议用粉丝可见或仅自己可见"
   },
   "allowed_users": {
-    "description": "允许发帖的发送者 ID 白名单；留空表示仅 AstrBot 管理员可发帖，填了则只按该白名单判断",
+    "description": "允许发帖和删除的发送者 ID 白名单；留空仅限 AstrBot 管理员，无法确认管理员身份时拒绝写操作",
     "type": "list",
     "default": []
   },
@@ -51,7 +51,7 @@
     "default": 60
   },
   "dry_run": {
-    "description": "只构造表单、不真正提交；首次部署建议先开启验证字段",
+    "description": "发帖只构造表单，删除只回显帖子 ID，不执行写操作；首次部署建议保持开启",
     "type": "bool",
     "default": true
   },
@@ -66,7 +66,7 @@
     "default": ""
   },
   "outbox_dedup_seconds": {
-    "description": "相同内容去重窗口（秒），窗口内已发送成功的相同内容会直接拒绝重发",
+    "description": "同账号、同提交表单的成功发送去重窗口（秒）；正在发送或结果未知的请求持续阻止重发",
     "type": "int",
     "default": 600
   },
