@@ -5,6 +5,7 @@ from __future__ import annotations
 import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
+from http.cookies import SimpleCookie
 
 from .client import XhhClient, XhhError
 
@@ -14,6 +15,7 @@ class QrLoginClient(XhhClient):
         super().__init__("", timeout=timeout)
         self._jar = CookieJar()
         self._opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self._jar))
+        self._login_ids = ()
 
     async def ticket(self) -> dict:
         path = "/account/get_qrcode_url/"
@@ -40,10 +42,13 @@ class QrLoginClient(XhhClient):
         path = "/account/qr_state/"
         result = self._unwrap(await self.request("GET", path, params=params), path)
         state = result.get("error")
-        if state in ("wait", "ready"):
+        if state == "wait":
             return "wait"
-        if state in ("scanned", "ok"):
-            return state
+        if state in ("ready", "scanned"):
+            return "scanned"
+        if state == "ok":
+            self._login_ids = tuple(result.get(key) for key in ("heybox_id", "user_heybox_id", "heyboxid"))
+            return "ok"
         if state in ("timeout", "expired"):
             return "expired"
         if state in ("cancel", "canceled", "denied"):
@@ -61,3 +66,11 @@ class QrLoginClient(XhhClient):
         if not cookies.get("user_pkey") or not cookies.get("x_xhh_tokenid"):
             raise XhhError("登录响应缺少 user_pkey 或 x_xhh_tokenid，原登录态未替换")
         return "; ".join(f"{name}={value}" for name, value in cookies.items())
+
+    def login_heybox_id(self) -> str:
+        cookies = SimpleCookie(self.login_cookie())
+        values = (*self._login_ids, *(cookies[key].value for key in ("heybox_id", "user_heybox_id") if key in cookies))
+        ids = {str(value).strip() for value in values if value is not None and value != ""}
+        if (len(ids) != 1 or any(not uid.isascii() or not uid.isdigit() or int(uid) <= 0 for uid in ids)):
+            raise XhhError("扫码会话未返回唯一有效的账号 ID，原登录态未替换")
+        return ids.pop()

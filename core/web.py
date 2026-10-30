@@ -87,6 +87,7 @@ class AccountWebUI:
             return json_response(self._snapshot())
 
     async def _poll(self, client, ticket):
+        stage = "查询扫码状态"
         try:
             async with asyncio.timeout(ticket["expire"]):
                 while True:
@@ -98,11 +99,15 @@ class AccountWebUI:
                     if state in ("expired", "canceled"):
                         self._login = {"state": state}
                         return
+                    stage = "读取扫码凭据"
                     cookie = client.login_cookie()
-                    async with XhhClient(cookie, timeout=client.timeout) as authenticated:
-                        status = await authenticated.account_status()
+                    stage = "读取新账号 ID"
+                    heybox_id = client.login_heybox_id()
+                    stage = "验证扫码登录态"
+                    status = await self._verify_account(cookie, heybox_id, timeout=client.timeout)
                     if not status.get("logged_in") or not status.get("user_id"):
                         raise XhhError("扫码后的登录态验证失败")
+                    stage = "保存登录配置"
                     self.plugin._save_login(cookie, status)
                     self._account = {"logged_in": True, "nickname": status.get("nickname", "")}
                     self._login = {"state": "success"}
@@ -113,10 +118,17 @@ class AccountWebUI:
             self._login = {"state": "canceled"}
             raise
         except Exception as exc:
-            logger.warning(f"[heybox_poster] 扫码登录失败：{type(exc).__name__}")
-            self._login = {"state": "failed"}
+            logger.warning(f"[heybox_poster] 扫码登录失败：{stage}（{type(exc).__name__}）")
+            self._login = {"state": "failed", "message": f"{stage}失败，原账号保留，请检查配置或重新扫码。"}
         finally:
             await client.close()
+
+    async def _verify_account(self, cookie, heybox_id, *, timeout=20):
+        async with XhhClient(cookie, heybox_id=heybox_id, timeout=timeout) as client:
+            status = await client.account_status()
+        if heybox_id and status.get("logged_in") and str(status.get("user_id")) != heybox_id:
+            return {"logged_in": False}
+        return status
 
     async def close(self):
         async with self._lock:
@@ -152,9 +164,9 @@ class AccountWebUI:
                 else:
                     # 使用独立实例，防止检查旧账号的返回值覆盖正在切换的新账号。
                     cookie = self.plugin._cookie()
-                    async with XhhClient(cookie) as client:
-                        status = await client.account_status()
-                    if cookie == self.plugin._cookie():
+                    heybox_id = str(self.plugin._c("heybox_id", "") or "").strip()
+                    status = await self._verify_account(cookie, heybox_id)
+                    if cookie == self.plugin._cookie() and heybox_id == str(self.plugin._c("heybox_id", "") or "").strip():
                         self._account = {key: status[key] for key in ("logged_in", "nickname", "user_id") if key in status}
             except Exception:
                 return error_response("检查失败，请确认网络后重试", status_code=502)
@@ -163,6 +175,9 @@ class AccountWebUI:
     async def logout(self):
         if response := self._unauthorized():
             return response
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or payload.get("confirm") is not True:
+            return error_response("清除本地登录态需要显式确认 confirm=true", status_code=400)
         async with self._lock:
             await self._stop()
             try:

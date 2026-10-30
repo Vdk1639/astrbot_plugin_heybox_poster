@@ -17,7 +17,7 @@ function render(data) {
     `${account.nickname || "已配置账号"} · ID ${account.user_id || "未填写"} · ${
       account.logged_in === true ? "登录有效" : account.logged_in === false ? "登录失效或无法验证" : "待检查"}`;
   const login = data.login;
-  $("status").textContent = labels[login.state] || "未知状态";
+  $("status").textContent = login.message || labels[login.state] || "未知状态";
   active = ["requesting", "wait", "scanned"].includes(login.state);
   expiresAt = login.expires_at || 0;
   $("qr").hidden = !login.qr_image;
@@ -49,7 +49,7 @@ $("logout").addEventListener("click", () => {
 });
 $("logout-confirm").addEventListener("close", () => {
   if ($("logout-confirm").returnValue === "logout") {
-    run(() => bridge.apiPost("auth/logout", {}));
+    run(() => bridge.apiPost("auth/logout", { confirm: true }));
   }
 });
 

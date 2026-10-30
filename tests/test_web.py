@@ -11,6 +11,7 @@ from unittest import mock
 
 from test_plugin_smoke import XhhPosterPlugin
 from astrbot_plugin_heybox_poster.core.client import XhhError
+from astrbot_plugin_heybox_poster.core.client import XhhClient
 from astrbot_plugin_heybox_poster.core.outbox import Outbox
 
 web_stub = types.ModuleType("astrbot.api.web")
@@ -39,6 +40,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.web = AccountWebUI(self.plugin)
         self.plugin.web = self.web
         web_stub.request.username = "admin"
+        web_stub.request.json = mock.AsyncMock(return_value={"confirm": True})
 
     def _cleanup_directory(self):
         for file in self.directory.iterdir():
@@ -74,9 +76,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         authenticated.__aenter__.return_value.account_status = mock.AsyncMock(
             return_value={"logged_in": True, "user_id": "42", "nickname": "tester"}
         )
-        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated), \
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated) as factory, \
              mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
             await self.web._poll(login, {"params": {"qr": "x"}, "expire": 120})
+        self.assertEqual(factory.call_args.kwargs["heybox_id"], "42")
         self.assertEqual(self.config["heybox_id"], "42")
         self.assertEqual(self.config.saved["user_pkey"], "new-p")
         self.assertIsNot(self.plugin._get_client(), old_client)
@@ -175,8 +178,9 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         authenticated.__aenter__.return_value.account_status = mock.AsyncMock(return_value={
             "logged_in": True, "user_id": "1", "nickname": "tester", "cookie": "secret-value",
         })
-        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated):
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated) as factory:
             response = await self.web.check()
+        self.assertEqual(factory.call_args.kwargs["heybox_id"], "1")
         self.assertTrue(response["account"]["logged_in"])
         self.assertNotIn("secret-value", json.dumps(response))
         await self.web.logout()
@@ -205,9 +209,69 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         result = await self.plugin.tool_publish(AstrMessageEvent(role="admin"), "test", "test", topic_ids="43")
         self.assertIn("dry-run", result)
 
+    async def test_logout_requires_literal_confirmation_before_any_side_effects(self):
+        self.plugin._save_login("user_pkey=new-p; x_xhh_tokenid=new-t", {"user_id": "42"})
+        original = dict(self.config)
+        self.web._login = {"state": "wait"}
+        with mock.patch.object(self.web, "_stop", new=mock.AsyncMock()) as stop:
+            for payload in ({}, {"confirm": False}, {"confirm": "true"}, {"confirm": 1}, [], None):
+                web_stub.request.json.return_value = payload
+                response = await self.web.logout()
+                self.assertEqual(response["code"], 400)
+                self.assertEqual(self.config, original)
+                self.assertTrue((self.directory / "login_backup.json").exists())
+                self.assertEqual(self.web._login["state"], "wait")
+            stop.assert_not_awaited()
+
+    async def test_qr_account_mismatch_never_replaces_existing_credentials(self):
+        original = dict(self.config)
+        authenticated = mock.MagicMock()
+        authenticated.__aenter__.return_value.account_status = mock.AsyncMock(return_value={
+            "logged_in": True, "user_id": "99", "nickname": "other",
+        })
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated), \
+             mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
+            await self.web._poll(self._login_client(["ok"]), {"params": {}, "expire": 120})
+        self.assertEqual(self.web._login["state"], "failed")
+        self.assertEqual(self.config, original)
+
+    async def test_failure_reports_stage_without_leaking_error_details(self):
+        login = self._login_client(["ok"])
+        login.login_heybox_id = mock.Mock(side_effect=XhhError("secret-value"))
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()), \
+             mock.patch("astrbot_plugin_heybox_poster.core.web.logger.warning") as warning:
+            await self.web._poll(login, {"params": {}, "expire": 120})
+        self.assertEqual(self.web._login["state"], "failed")
+        self.assertIn("账号 ID", self.web._login["message"])
+        self.assertIn("账号 ID", warning.call_args.args[0])
+        self.assertNotIn("secret-value", warning.call_args.args[0])
+        self.assertNotIn("secret-value", json.dumps(await self.web.status()))
+
+    async def test_first_login_then_check_sends_new_id_in_signed_requests(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        self.config.update(cookie="", user_pkey="", x_xhh_tokenid="", heybox_id="")
+        requests = []
+
+        def server(client, method, url, form):
+            requests.append(url)
+            if parse_qs(urlsplit(url).query).get("heybox_id") != ["42"]:
+                return {"status": "login"}
+            return {"status": "ok", "result": {"profile": {"heybox_id": "42", "nickname": "tester"}}}
+
+        with mock.patch.object(XhhClient, "_request_sync", autospec=True, side_effect=server), \
+             mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
+            await self.web._poll(self._login_client(["ok"]), {"params": {}, "expire": 120})
+            self.assertEqual(self.web._login["state"], "success")
+            self.assertTrue((await self.web.check())["account"]["logged_in"])
+        self.assertEqual(self.config["heybox_id"], "42")
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all("hkey=" in url for url in requests))
+
     def _login_client(self, states):
         return types.SimpleNamespace(
             poll=mock.AsyncMock(side_effect=states), timeout=20,
             login_cookie=lambda: "user_pkey=new-p; x_xhh_tokenid=new-t",
+            login_heybox_id=lambda: "42",
             close=mock.AsyncMock(),
         )

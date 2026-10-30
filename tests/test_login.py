@@ -52,7 +52,7 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_normalizes_states_and_rejects_unknown(self):
         client = QrLoginClient()
-        for raw, expected in (("wait", "wait"), ("ready", "wait"), ("ok", "ok"), ("scanned", "scanned"),
+        for raw, expected in (("wait", "wait"), ("ready", "scanned"), ("ok", "ok"), ("scanned", "scanned"),
                               ("timeout", "expired"), ("expired", "expired"), ("denied", "canceled")):
             client.request = mock.AsyncMock(return_value={"status": "ok", "result": {"error": raw}})
             self.assertEqual(await client.poll({"qr": "x"}), expected)
@@ -90,3 +90,33 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
         for result in ({}, {"profile": []}, [], "invalid"):
             client.request.return_value = {"status": "ok", "result": result}
             self.assertFalse((await client.account_status())["logged_in"])
+
+    async def test_qr_identity_comes_from_new_response_or_cookie_aliases(self):
+        for result, extra in (({"heyboxid": "42"}, {}), ({"heybox_id": 42}, {}),
+                              ({}, {"heybox_id": "42"}), ({}, {"user_heybox_id": "42"})):
+            with self.subTest(result=result, extra=extra):
+                client = self._login_with_cookies(extra)
+                client.request = mock.AsyncMock(return_value={"status": "ok", "result": {"error": "ok", **result}})
+                self.assertEqual(await client.poll({"qr": "x"}), "ok")
+                self.assertEqual(client.login_heybox_id(), "42")
+
+    async def test_missing_invalid_or_conflicting_qr_identity_is_rejected(self):
+        for result, extra in (({}, {}), ({"heyboxid": "secret-value"}, {}),
+                              ({"heyboxid": True}, {}), ({"heyboxid": "４２"}, {}),
+                              ({"heyboxid": "42"}, {"user_heybox_id": "99"})):
+            client = self._login_with_cookies(extra)
+            client.request = mock.AsyncMock(return_value={"status": "ok", "result": {"error": "ok", **result}})
+            await client.poll({"qr": "x"})
+            with self.assertRaises(XhhError) as caught:
+                client.login_heybox_id()
+            self.assertNotIn("secret-value", str(caught.exception))
+
+    def _login_with_cookies(self, extra):
+        import urllib.request
+
+        client = QrLoginClient()
+        headers = Message()
+        for name, value in {"user_pkey": "new-p", "x_xhh_tokenid": "new-t", **extra}.items():
+            headers.add_header("Set-Cookie", f"{name}={value}; Domain=.xiaoheihe.cn; Path=/; Secure")
+        client._jar.extract_cookies(mock.Mock(info=lambda: headers), urllib.request.Request("https://api.xiaoheihe.cn/account/qr_state/"))
+        return client

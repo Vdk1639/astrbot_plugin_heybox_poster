@@ -18,7 +18,7 @@ async function page(withBridge = true) {
   }
   const buttons = ["check", "logout", "start", "cancel"].map((id) => elements.get(id));
   const initial = { account: { has_credentials: true, user_id: "42" }, login: { state: "idle" } };
-  const state = { data: initial, calls: [], timers: [], events: {}, fail: false };
+  const state = { data: initial, calls: [], bodies: [], timers: [], events: {}, fail: false };
   const bridge = {
     ready: async () => ({}),
     apiGet: async (path) => {
@@ -26,8 +26,9 @@ async function page(withBridge = true) {
       if (state.fail) throw new Error("secret-payload");
       return state.data;
     },
-    apiPost: async (path) => {
+    apiPost: async (path, body) => {
       state.calls.push(["POST", path]);
+      state.bodies.push(body);
       if (state.fail) throw new Error("secret-payload");
       return state.data;
     },
@@ -77,7 +78,12 @@ elements.get("logout-confirm").returnValue = "logout";
 state.data = { account: { has_credentials: false }, login: { state: "idle" } };
 await trigger("logout-confirm", "close");
 assert.deepEqual(state.calls.at(-1), ["POST", "auth/logout"]);
+assert.equal(state.bodies.at(-1).confirm, true);
 assert.match(elements.get("account").textContent, /尚未配置/);
+
+state.data.login = { state: "failed", message: "读取新账号 ID 失败，原账号保留。" };
+await trigger("check");
+assert.match(elements.get("status").textContent, /读取新账号 ID/);
 
 state.fail = true;
 await trigger("start");
