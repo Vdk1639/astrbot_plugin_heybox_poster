@@ -106,4 +106,4 @@ Cookie 需包含 `user_pkey` 与 `x_xhh_tokenid`，并建议填写当前账号�
 
 本项目以 [MIT License](LICENSE) 发布。感谢 xiaoheihe-cli、小黑盒适配器等参考项目，完整引用与许可声明见[第三方声明](THIRD_PARTY_NOTICES.md)。
 
-本项目由 DeepSeek 协助开发，并在 DeepSeek Harness 与 Codex 的支持下完成。
+本项目在 DeepSeek Harness 与 Codex 的支持下完成。
