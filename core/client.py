@@ -154,6 +154,8 @@ class XhhClient:
         self.outbox = outbox
         self._account_key = account_key(self.cookie, self.heybox_id)
         self._opener = None
+        device = SimpleCookie(self.cookie).get("device_id")
+        self.device_id = device.value if device else ""
 
     # ------------------------------------------------------------------
     @property
@@ -174,6 +176,8 @@ class XhhClient:
     def _build_url(self, path: str, params: dict | None, write: bool) -> str:
         signed = signed_params(path)
         query: dict[str, Any] = dict(BASE_PARAMS)
+        if self.device_id:
+            query["device_id"] = self.device_id
         query.update({k: v for k, v in (params or {}).items() if v is not None})
         if self.heybox_id:
             query["heybox_id"] = self.heybox_id
@@ -273,18 +277,17 @@ class XhhClient:
         """返回 ``{logged_in, nickname, user_id, ...}``。"""
         path = "/account/restore_login"
         try:
-            payload = await self.request("GET", path)
-        except XhhError:
-            return {"logged_in": False}
-        if payload.get("status") != "ok":
-            return {"logged_in": False, "status": payload.get("status")}
-        result = payload.get("result")
-        if not isinstance(result, dict):
-            return {"logged_in": False}
+            result = self._unwrap(await self.request("GET", path), path)
+        except XhhError as exc:
+            if exc.status in {"login", "relogin", "expired"}:
+                return {"logged_in": False}
+            raise NetworkError("登录检查暂时不可用，请稍后重试", path=path) from None
         profile = result.get("profile") or result.get("account_detail") or result
         if not isinstance(profile, dict):
-            return {"logged_in": False}
+            raise NetworkError("登录检查响应缺少账号信息", path=path)
         uid = profile.get("heybox_id") or profile.get("heyboxid") or profile.get("userid") or result.get("heybox_id")
+        if not uid:
+            raise NetworkError("登录检查响应缺少账号 ID", path=path)
         return {
             "logged_in": bool(uid),
             "nickname": profile.get("nickname") or "",

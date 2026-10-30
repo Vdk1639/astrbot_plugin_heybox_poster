@@ -1,5 +1,7 @@
 """扫码协议回归，不访问真实账号或网络。"""
 
+import base64
+import hashlib
 import pathlib
 import sys
 import unittest
@@ -8,13 +10,13 @@ from email.message import Message
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from astrbot_plugin_heybox_poster.core.client import XhhClient, XhhError
+from astrbot_plugin_heybox_poster.core.client import NetworkError, XhhClient, XhhError
 from astrbot_plugin_heybox_poster.core.login import QrLoginClient
 
 
 class LoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_ticket_preserves_both_supported_poll_query_shapes(self):
-        for query in ("qr=test&app=heybox", "qr_ticket=test&device=web"):
+        for query in ("qr=test&app=heybox", "qr_ticket=test&device=web&session=opaque&empty="):
             with self.subTest(query=query):
                 client = QrLoginClient()
                 client.request = mock.AsyncMock(return_value={"status": "ok", "result": {
@@ -23,14 +25,14 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
                 }})
                 ticket = await client.ticket()
                 self.assertEqual(ticket["expire"], 120)
-                params = dict(urllib.parse.parse_qsl(query))
+                params = dict(urllib.parse.parse_qsl(query, keep_blank_values=True))
                 self.assertEqual(ticket["params"], params)
                 client.request.return_value = {"status": "ok", "result": {"error": "scanned"}}
                 self.assertEqual(await client.poll(params), "scanned")
                 self.assertEqual(client.request.call_args.kwargs["params"], params)
                 signed = urllib.parse.parse_qs(urllib.parse.urlsplit(client._build_url(
                     "/account/qr_state/", params, False
-                )).query)
+                )).query, keep_blank_values=True)
                 self.assertTrue(signed["hkey"])
                 for key, value in params.items():
                     self.assertEqual(signed[key], [value])
@@ -50,16 +52,17 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(XhhError):
                     await client.ticket()
 
-    async def test_poll_normalizes_states_and_rejects_unknown(self):
+    async def test_poll_normalizes_states_and_keeps_unknown_pending(self):
         client = QrLoginClient()
         for raw, expected in (("wait", "wait"), ("ready", "scanned"), ("ok", "ok"), ("scanned", "scanned"),
-                              ("timeout", "expired"), ("expired", "expired"), ("denied", "canceled")):
+                              ("timeout", "expired"), ("expired", "expired"), ("denied", "canceled"),
+                              ("success", "ok"), ("CONFIRMED", "ok"), ("", "wait"), ("login", "wait"),
+                              ("secret-value", "wait"), ("failed", "failed")):
             client.request = mock.AsyncMock(return_value={"status": "ok", "result": {"error": raw}})
             self.assertEqual(await client.poll({"qr": "x"}), expected)
-        client.request.return_value = {"status": "ok", "result": {"error": "secret-value"}}
-        with self.assertRaises(XhhError) as caught:
-            await client.poll({"qr": "x"})
-        self.assertNotIn("secret-value", str(caught.exception))
+        for raw, expected in ((0, "wait"), (1, "scanned"), (2, "ok"), (3, "expired"), (-1, "failed")):
+            client.request.return_value = {"status": "ok", "result": {"qr_state": raw}}
+            self.assertEqual(await client.poll({"qr": "x"}), expected)
 
     async def test_cookie_jar_collects_set_cookie_and_sessions_are_isolated(self):
         client = QrLoginClient()
@@ -89,7 +92,59 @@ class LoginTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await client.account_status(), {"logged_in": True, "nickname": "tester", "user_id": "42"})
         for result in ({}, {"profile": []}, [], "invalid"):
             client.request.return_value = {"status": "ok", "result": result}
-            self.assertFalse((await client.account_status())["logged_in"])
+            with self.assertRaises(NetworkError):
+                await client.account_status()
+
+    async def test_account_network_failure_is_not_reported_as_expired(self):
+        client = XhhClient("user_pkey=x")
+        for error in (NetworkError("secret-value"), XhhError("secret-value", status="failed")):
+            client.request = mock.AsyncMock(side_effect=error)
+            with self.assertRaises(NetworkError) as caught:
+                await client.account_status()
+            self.assertNotIn("secret-value", str(caught.exception))
+        client.request = mock.AsyncMock(return_value={"status": "login"})
+        self.assertEqual(await client.account_status(), {"logged_in": False})
+
+    async def test_json_only_credentials_match_reference_and_keep_client_identity(self):
+        client = QrLoginClient()
+        client.request = mock.AsyncMock(return_value={"status": "ok", "result": {
+            "error": "ok", "heyboxid": "10001", "nickname": "MockUser", "pkey": "fixture-pkey",
+        }})
+        self.assertEqual(await client.poll({"qr": "x"}), "ok")
+        with mock.patch("astrbot_plugin_heybox_poster.core.login.time.time", return_value=123), \
+             mock.patch("astrbot_plugin_heybox_poster.core.login.secrets.token_hex", side_effect=["a", "b", "c"]):
+            cookie = client.login_cookie()
+        from http.cookies import SimpleCookie
+        parsed = SimpleCookie(cookie)
+        expected = b"".join(hashlib.md5(x.encode(), usedforsecurity=False).digest() for x in ("123", "a", "b", "c")) + b"\x00"
+        self.assertEqual(base64.b64decode(parsed["x_xhh_tokenid"].value), expected)
+        self.assertEqual(parsed["user_pkey"].value, "fixture-pkey")
+        self.assertEqual(client.login_heybox_id(), "10001")
+        self.assertEqual(client.nickname, "MockUser")
+        self.assertEqual(client.login_cookie(), cookie)
+        restored = XhhClient(cookie)
+        for current, path in ((client, "/account/get_qrcode_url/"), (client, "/account/qr_state/"),
+                              (restored, "/account/restore_login")):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(current._build_url(path, {}, False)).query)
+            self.assertEqual(query["device_id"], [client.device_id])
+
+    async def test_nested_and_embedded_credentials_and_invalid_values(self):
+        for key in ("user", "account", "profile", "account_detail"):
+            client = QrLoginClient()
+            client.request = mock.AsyncMock(return_value={"status": "ok", "result": {"state": 2, key: {
+                "uid": "42", "username": "tester", "cookies": {"user_pkey": "p", "x_xhh_tokenid": "t"},
+            }}})
+            await client.poll({"qr": "x"})
+            self.assertIn("user_pkey=p", client.login_cookie())
+            self.assertEqual(client.login_heybox_id(), "42")
+            self.assertEqual(client.nickname, "tester")
+        for creds in ({"heyboxid": "42"}, {"heyboxid": "42", "pkey": "p\r\nInjected: x"},
+                      {"heyboxid": "42", "pkey": {"bad": "shape"}}):
+            client = QrLoginClient()
+            client.request = mock.AsyncMock(return_value={"status": "ok", "result": {"error": "ok", **creds}})
+            await client.poll({"qr": "x"})
+            with self.assertRaises(XhhError):
+                client.login_cookie()
 
     async def test_qr_identity_comes_from_new_response_or_cookie_aliases(self):
         for result, extra in (({"heyboxid": "42"}, {}), ({"heybox_id": 42}, {}),

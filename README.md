@@ -12,7 +12,7 @@ AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册
 - 话题搜索解析，或直接指定话题 ID
 - 风控识别，命中 `show_captcha` 时提示更新 Cookie
 - 白名单、冷却时间、`dry_run` 预演
-- WebUI 账号管理、扫码登录及切换；凭据验证成功后自动保存
+- WebUI 账号管理、扫码登录及切换；收到服务端确认和完整凭据后自动保存
 - 限流冷却落盘，插件重载或进程重启后继续生效
 
 ## 安装
@@ -25,11 +25,11 @@ AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册
 
 ### 获取 Cookie
 
-**优先使用内置账号管理页**：点击「获取 / 刷新二维码」，用小黑盒 App 扫码并确认。页面显示等待扫码、已扫码待确认、成功、取消或过期状态，后台每 2 秒检查一次，最长 120 秒；过期后手动刷新。
+**优先使用内置账号管理页**：点击「获取 / 刷新二维码」，用小黑盒 App 扫码并确认。页面分别显示当前账号登录态和扫码进度，并显示本次会话编号、成功查询次数和最后响应时间。后台每 3 秒查询一次，失败时按 2 / 4 / 8 / 10 秒退避重试，最长 120 秒；过期后手动刷新，请只扫页面当前显示的码。
 
-当前插件使用一个发帖账号。再次扫码可以切换账号；只有取得 `user_pkey` 和 `x_xhh_tokenid`、验证账号 ID 后才覆盖配置并重建客户端，失败时保留原账号。页面可检查登录态、取消扫码和清除本插件的本地登录凭据；清除不会撤销小黑盒 App 或其他客户端的会话。
+当前插件使用一个发帖账号。再次扫码可以切换账号；只有服务端明确返回成功、取得 `user_pkey` 且账号 ID 唯一有效后才覆盖配置并重建客户端，失败时保留原账号。凭据既可来自 Cookie，也可来自 JSON 或嵌套的 user / account / profile / account_detail；缺少 `x_xhh_tokenid` 时按参考适配器公式生成客户端标识，设备标识随凭据保留。扫码保存不再以额外的 `restore_login` 请求作为前提。
 
-扫码校验从新会话响应或 Cookie（`heybox_id` / `user_heybox_id`）取得 ID，不使用旧账号 ID；检查现有登录态则使用配置里的 ID。`ready` 表示已扫码待确认。失败时页面与日志会说明是读取凭据、读取账号 ID、验证登录态还是保存配置失败，不显示 Cookie 或服务端原始响应。
+扫码校验从新会话响应或 Cookie 取得 ID，不使用旧账号 ID；检查现有登录态仍调用 `/account/restore_login` 并携带配置里的 ID。打开页面时自动检查已配置的账号，网络或响应异常显示「暂时无法验证」，仅明确的失效响应才显示「登录已失效」。`ready` 只表示已扫码、等待服务端确认结果；手机已确认但接口一直返回 `ready` 时不会假报成功，请等待或过期后获取新码。未知扫码状态继续等待，单次查询失败不结束会话。日志和页面只显示固定环节、异常类型及重试次数，不输出原始响应或凭据。
 
 「清除本地登录态」确认后会立即删除当前凭据和旧备份，需要重新扫码或填写 Cookie 才能恢复。直接调用 `auth/logout` 也必须发送 JSON `{"confirm": true}`；缺失、字符串或数字确认值均会被拒绝。
 
@@ -129,7 +129,7 @@ node get_token.js --attach 9333   # 附着已登录的 Chrome
 | [AaronZ345/xiaoheihe-cli](https://github.com/AaronZ345/xiaoheihe-cli) | MIT（© 2025 Li Fangyu） | `hkey` 签名变换、Workshop `_rnd` 公式、发帖表单字段、话题搜索接口 |
 | [56dz/xiaoheihe-api](https://github.com/56dz/xiaoheihe-api) | GPL-3.0 | `hkey` 算法说明；`tests/` 中 6 组真实抓包签名向量（仅测试数据） |
 | [ylty1516/xiaoheihe-agent](https://github.com/ylty1516/xiaoheihe-agent) | MIT（`pyproject.toml` 声明，仓库未附 LICENSE 文件） | 长文必填字段与发帖踩坑记录 |
-| [674537331/astrbot_plugin_xiaoheihe_adapter](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter) | MIT（© 2026 RyanVaderAn） | WebUI 页面与 Dashboard 鉴权方式、扫码参数兼容参考，独立实现 |
+| [674537331/astrbot_plugin_xiaoheihe_adapter](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter) | MIT（© 2026 RyanVaderAn） | WebUI / Dashboard 鉴权、扫码凭据解析与重试方案参考，改编客户端标识公式，许可见 THIRD_PARTY_NOTICES.md |
 
 另评估但未采用代码：[wsmxd/XiaoheiheMcpServer](https://github.com/wsmxd/XiaoheiheMcpServer)（MIT，Playwright 方案）。
 

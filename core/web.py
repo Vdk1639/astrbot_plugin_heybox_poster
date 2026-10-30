@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import secrets
 import time
 
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 
-from .client import XhhClient, XhhError
+from .client import XhhClient
 from .login import QrLoginClient
 
 
@@ -74,6 +75,7 @@ class AccountWebUI:
                 qrcode.make(ticket["url"]).save(image, format="PNG")
                 self._login = {
                     "state": "wait", "expires_at": time.time() + ticket["expire"],
+                    "session_id": secrets.token_hex(3), "poll_count": 0,
                     "qr_image": "data:image/png;base64," + base64.b64encode(image.getvalue()).decode("ascii"),
                 }
                 self._task = asyncio.create_task(self._poll(client, ticket))
@@ -88,25 +90,34 @@ class AccountWebUI:
 
     async def _poll(self, client, ticket):
         stage = "查询扫码状态"
+        failures = 0
         try:
             async with asyncio.timeout(ticket["expire"]):
                 while True:
-                    await asyncio.sleep(2)
-                    state = await client.poll(ticket["params"])
-                    if state in ("wait", "scanned"):
-                        self._login["state"] = state
+                    await asyncio.sleep(min(2 ** min(failures, 4), 10) if failures else 3)
+                    try:
+                        state = await client.poll(ticket["params"])
+                    except Exception as exc:
+                        failures += 1
+                        self._login.update(retries=failures, retrying=True)
+                        logger.warning(f"[heybox_poster] 查询扫码状态暂时失败，第 {failures} 次重试（{type(exc).__name__}）")
                         continue
-                    if state in ("expired", "canceled"):
+                    failures = 0
+                    self._login.update(retrying=False, retries=0, updated_at=time.time(),
+                                       poll_count=self._login.get("poll_count", 0) + 1)
+                    if state in ("wait", "scanned"):
+                        if state == "scanned" or self._login["state"] != "scanned":
+                            self._login["state"] = state
+                        continue
+                    if state in ("expired", "canceled", "failed"):
                         self._login = {"state": state}
                         return
+                    self._login["state"] = "saving"
                     stage = "读取扫码凭据"
                     cookie = client.login_cookie()
                     stage = "读取新账号 ID"
                     heybox_id = client.login_heybox_id()
-                    stage = "验证扫码登录态"
-                    status = await self._verify_account(cookie, heybox_id, timeout=client.timeout)
-                    if not status.get("logged_in") or not status.get("user_id"):
-                        raise XhhError("扫码后的登录态验证失败")
+                    status = {"user_id": heybox_id, "nickname": client.nickname}
                     stage = "保存登录配置"
                     self.plugin._save_login(cookie, status)
                     self._account = {"logged_in": True, "nickname": status.get("nickname", "")}
@@ -143,7 +154,7 @@ class AccountWebUI:
             except asyncio.CancelledError:
                 pass
             self._task = None
-            if self._login["state"] in ("requesting", "wait", "scanned"):
+            if self._login["state"] in ("requesting", "wait", "scanned", "saving"):
                 self._login = {"state": "canceled"}
 
     async def cancel(self):
@@ -158,18 +169,19 @@ class AccountWebUI:
         if response := self._unauthorized():
             return response
         async with self._lock:
+            cookie = self.plugin._cookie()
+            heybox_id = str(self.plugin._c("heybox_id", "") or "").strip()
             try:
-                if not self.plugin._cookie():
+                if not cookie:
                     self._account = {"logged_in": False}
                 else:
                     # 使用独立实例，防止检查旧账号的返回值覆盖正在切换的新账号。
-                    cookie = self.plugin._cookie()
-                    heybox_id = str(self.plugin._c("heybox_id", "") or "").strip()
                     status = await self._verify_account(cookie, heybox_id)
                     if cookie == self.plugin._cookie() and heybox_id == str(self.plugin._c("heybox_id", "") or "").strip():
                         self._account = {key: status[key] for key in ("logged_in", "nickname", "user_id") if key in status}
             except Exception:
-                return error_response("检查失败，请确认网络后重试", status_code=502)
+                if cookie == self.plugin._cookie() and heybox_id == str(self.plugin._c("heybox_id", "") or "").strip():
+                    self._account = {"logged_in": None, "check_unavailable": True}
             return json_response(self._snapshot())
 
     async def logout(self):

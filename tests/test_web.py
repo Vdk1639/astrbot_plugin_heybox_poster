@@ -69,17 +69,13 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             if not route.endswith("status"):
                 self.assertEqual(methods, ["POST"])
 
-    async def test_success_verifies_saves_backup_rebuilds_and_redacts(self):
+    async def test_confirmed_credentials_save_without_second_network_gate(self):
         old_client = self.plugin._get_client()
         login = self._login_client(["wait", "scanned", "ok"])
-        authenticated = mock.MagicMock()
-        authenticated.__aenter__.return_value.account_status = mock.AsyncMock(
-            return_value={"logged_in": True, "user_id": "42", "nickname": "tester"}
-        )
-        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated) as factory, \
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient") as factory, \
              mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
             await self.web._poll(login, {"params": {"qr": "x"}, "expire": 120})
-        self.assertEqual(factory.call_args.kwargs["heybox_id"], "42")
+        factory.assert_not_called()
         self.assertEqual(self.config["heybox_id"], "42")
         self.assertEqual(self.config.saved["user_pkey"], "new-p")
         self.assertIsNot(self.plugin._get_client(), old_client)
@@ -134,14 +130,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.web.close()
         self.assertEqual((await self.web.qr())["code"], 503)
 
-    async def test_failed_verification_expiry_and_unknown_errors_preserve_original(self):
+    async def test_expiry_cancellation_and_explicit_failure_preserve_original(self):
         original = dict(self.config)
-        authenticated = mock.MagicMock()
-        authenticated.__aenter__.return_value.account_status = mock.AsyncMock(return_value={"logged_in": False})
-        for states, expected in ((["ok"], "failed"), (["expired"], "expired"), (["canceled"], "canceled"),
-                                 ([XhhError("secret-cookie")], "failed")):
-            with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated), \
-                 mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
+        for states, expected in ((["failed"], "failed"), (["expired"], "expired"), (["canceled"], "canceled")):
+            with mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
                 await self.web._poll(self._login_client(states), {"params": {}, "expire": 120})
             self.assertEqual(self.web._login["state"], expected)
             self.assertEqual(self.config, original)
@@ -223,15 +215,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.web._login["state"], "wait")
             stop.assert_not_awaited()
 
-    async def test_qr_account_mismatch_never_replaces_existing_credentials(self):
+    async def test_invalid_qr_identity_never_replaces_existing_credentials(self):
         original = dict(self.config)
-        authenticated = mock.MagicMock()
-        authenticated.__aenter__.return_value.account_status = mock.AsyncMock(return_value={
-            "logged_in": True, "user_id": "99", "nickname": "other",
-        })
-        with mock.patch("astrbot_plugin_heybox_poster.core.web.XhhClient", return_value=authenticated), \
-             mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
-            await self.web._poll(self._login_client(["ok"]), {"params": {}, "expire": 120})
+        login = self._login_client(["ok"])
+        login.login_heybox_id = mock.Mock(side_effect=XhhError("conflicting identities"))
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()):
+            await self.web._poll(login, {"params": {}, "expire": 120})
         self.assertEqual(self.web._login["state"], "failed")
         self.assertEqual(self.config, original)
 
@@ -265,7 +254,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.web._login["state"], "success")
             self.assertTrue((await self.web.check())["account"]["logged_in"])
         self.assertEqual(self.config["heybox_id"], "42")
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 1)
         self.assertTrue(all("hkey=" in url for url in requests))
 
     def _login_client(self, states):
@@ -273,5 +262,70 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             poll=mock.AsyncMock(side_effect=states), timeout=20,
             login_cookie=lambda: "user_pkey=new-p; x_xhh_tokenid=new-t",
             login_heybox_id=lambda: "42",
+            nickname="tester",
             close=mock.AsyncMock(),
         )
+
+    async def test_transient_poll_failures_retry_and_preserve_scanned_progress(self):
+        login = self._login_client(["scanned", XhhError("secret-value"), XhhError("secret-value"),
+                                    XhhError("secret-value"), "wait", "ok"])
+        snapshots = []
+
+        async def delay(seconds):
+            snapshots.append((seconds, dict(self.web._login)))
+
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", side_effect=delay), \
+             mock.patch("astrbot_plugin_heybox_poster.core.web.logger.warning") as warning:
+            await self.web._poll(login, {"params": {}, "expire": 120})
+        self.assertEqual([s for s, _ in snapshots], [3, 3, 2, 4, 8, 3])
+        self.assertEqual(snapshots[4][1]["state"], "scanned")
+        self.assertEqual(snapshots[4][1]["retries"], 3)
+        self.assertFalse(snapshots[5][1]["retrying"])
+        self.assertEqual(snapshots[5][1]["state"], "scanned")
+        self.assertEqual(self.web._login["state"], "success")
+        self.assertNotIn("secret-value", str(warning.call_args_list))
+
+    async def test_ready_and_endless_network_failures_expire_without_saving(self):
+        original = dict(self.config)
+        real_sleep = asyncio.sleep
+        for value in ("scanned", XhhError("secret-value")):
+            login = self._login_client([])
+            if isinstance(value, Exception):
+                login.poll.side_effect = value
+            else:
+                login.poll.side_effect = None
+                login.poll.return_value = value
+            async def delay(seconds):
+                await real_sleep(.001)
+            with mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", side_effect=delay):
+                await self.web._poll(login, {"params": {}, "expire": .02})
+            self.assertEqual(self.web._login["state"], "expired")
+            self.assertEqual(self.config, original)
+            login.close.assert_awaited_once()
+
+    async def test_check_failure_is_visible_without_marking_credentials_invalid(self):
+        with mock.patch.object(self.web, "_verify_account", side_effect=XhhError("secret-value")):
+            response = await self.web.check()
+        self.assertTrue(response["account"]["has_credentials"])
+        self.assertIsNone(response["account"]["logged_in"])
+        self.assertTrue(response["account"]["check_unavailable"])
+        self.assertNotIn("secret-value", json.dumps(response))
+
+    async def test_json_only_qr_confirmation_saves_real_parser_credentials(self):
+        from astrbot_plugin_heybox_poster.core.login import QrLoginClient
+        login = QrLoginClient()
+        login.request = mock.AsyncMock(side_effect=[
+            {"status": "ok", "result": {"error": "ready", "error_msg": "等待点击登录"}},
+            {"status": "ok", "result": {"error": "ok", "profile": {
+                "heyboxid": "42", "pkey": "json-p", "nickname": "tester",
+            }}},
+        ])
+        with mock.patch("astrbot_plugin_heybox_poster.core.web.asyncio.sleep", new=mock.AsyncMock()), \
+             mock.patch.object(self.web, "_verify_account", side_effect=AssertionError("no extra gate")):
+            await self.web._poll(login, {"params": {"qr": "test-ticket"}, "expire": 120})
+        self.assertEqual(self.web._login["state"], "success")
+        self.assertEqual(self.config.saved["user_pkey"], "json-p")
+        self.assertEqual(self.config.saved["heybox_id"], "42")
+        self.assertTrue(self.config.saved["x_xhh_tokenid"])
+        self.assertEqual(self.plugin._get_client().device_id, login.device_id)
+        self.assertNotIn("json-p", json.dumps(await self.web.status()))
