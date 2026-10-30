@@ -54,10 +54,9 @@ async function page(withBridge = true, setup = () => {}) {
   return { elements, state, trigger };
 }
 
-function assertSteps(elements, expected) {
-  const current = expected.indexOf("current");
-  assert.equal(elements.get("login-steps").dataset.focus, current < 0 ? "none" : String(current));
-  if (current >= 0) assert.equal(elements.get("login-steps").style["--step-index"], String(current));
+function assertSteps(elements, expected, focus = expected.indexOf("current")) {
+  assert.equal(elements.get("login-steps").dataset.focus, focus < 0 ? "none" : String(focus));
+  if (focus >= 0) assert.equal(elements.get("login-steps").style["--step-index"], String(focus));
   for (const [index, status] of expected.entries()) {
     const id = `step-${index + 1}`;
     assert.equal(elements.get(id).dataset.step, status, id);
@@ -102,6 +101,7 @@ assert.equal(elements.get("login-steps").style.writes, focusWrites);
 state.data.login = { state: "saving" };
 await state.timers[0]();
 assertSteps(elements, ["done", "done", "current"]);
+const savingFocusWrites = elements.get("login-steps").style.writes;
 state.data = { account: { has_credentials: true, logged_in: true, user_id: "99", nickname: "<script>test</script>" },
   login: { state: "success" } };
 await state.timers[0]();
@@ -112,7 +112,8 @@ assert.match(elements.get("account-state").textContent, /已登录/);
 assert.equal(elements.get("cancel").disabled, true);
 assert.equal(elements.get("qr-placeholder-title").textContent, "账号已保存");
 assert.equal(elements.get("diagnostics").hidden, true);
-assertSteps(elements, ["done", "done", "done"]);
+assertSteps(elements, ["done", "done", "done"], 2);
+assert.equal(elements.get("login-steps").style.writes, savingFocusWrites);
 assert.equal(elements.get("login-steps").style["--step-index"], "2");
 state.data.account = { has_credentials: true, check_unavailable: true, logged_in: null, user_id: "99" };
 await trigger("check");
@@ -270,7 +271,7 @@ assert.equal(malformed.elements.get("cancel").disabled, false);
 const progress = await page(true, (next) => {
   next.data = { account: { has_credentials: true }, login: { state: "success" } };
 });
-assertSteps(progress.elements, ["done", "done", "done"]);
+assertSteps(progress.elements, ["done", "done", "done"], 2);
 let rejectRefresh;
 progress.state.post = () => new Promise((resolve, reject) => { rejectRefresh = reject; });
 const refreshing = progress.trigger("start");
@@ -308,7 +309,7 @@ await progress.trigger("check");
 assertSteps(progress.elements, ["current", "pending", "pending"]);
 progress.state.data.login = { state: "success" };
 await progress.state.timers[0]();
-assertSteps(progress.elements, ["done", "done", "done"]);
+assertSteps(progress.elements, ["done", "done", "done"], 2);
 
 // 第二步刷新时底板回到第一步，结果未确认也不会复用旧焦点。
 progress.state.data.login = { state: "scanned" };

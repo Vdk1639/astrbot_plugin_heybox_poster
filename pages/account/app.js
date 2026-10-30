@@ -26,10 +26,11 @@ function renderSteps(state) {
   const current = { idle: 0, requesting: 0, wait: 0, scanned: 1, saving: 2 }[state] ?? -1;
   const completed = state === "success" ? 3 : Math.max(0, current);
   const steps = $("login-steps");
-  const focus = current >= 0 ? String(current) : "none";
+  const focusIndex = state === "success" ? 2 : current;
+  const focus = focusIndex >= 0 ? String(focusIndex) : "none";
   if (steps.dataset.focus !== focus) {
     steps.dataset.focus = focus;
-    if (current >= 0) steps.style.setProperty("--step-index", String(current));
+    if (focusIndex >= 0) steps.style.setProperty("--step-index", String(focusIndex));
   }
   for (let index = 0; index < 3; index++) {
     const id = `step-${index + 1}`;
