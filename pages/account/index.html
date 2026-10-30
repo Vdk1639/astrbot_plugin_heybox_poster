@@ -8,32 +8,62 @@
 </head>
 <body>
   <main>
-    <h1>账号管理</h1>
-    <p>管理当前发帖账号。用小黑盒 App 扫码并确认，收到成功结果与完整凭据后自动保存并切换。</p>
-    <section aria-labelledby="account-title">
-      <h2 id="account-title">当前账号</h2>
-      <p id="account-state" role="status" aria-live="polite">正在检查…</p>
-      <p id="account">正在读取…</p>
-      <button id="check" type="button">检查登录态</button>
-      <button id="logout" type="button" class="secondary">清除本地登录态</button>
-    </section>
-    <section aria-labelledby="qr-title">
-      <h2 id="qr-title">扫码登录 / 切换账号</h2>
-      <p id="status" role="status" aria-live="polite">尚未开始</p>
-      <p id="progress" class="note"></p>
-      <img id="qr" width="256" height="256" alt="使用小黑盒 App 扫描此二维码登录" hidden>
-      <p id="expiry"></p>
-      <button id="start" type="button">获取 / 刷新二维码</button>
-      <button id="cancel" type="button" class="secondary">取消扫码</button>
-      <p class="note">二维码最长有效 120 秒，请只扫页面当前显示的码；刷新后插件停止处理旧会话。手机确认后若仍显示等待，表示服务端尚未返回成功结果，过期后请获取新码。切换前会在插件数据目录保留一份旧凭据备份；清除登录态时一并删除备份，仅影响本插件。</p>
-    </section>
+    <header class="page-header">
+      <p class="eyebrow">小黑盒发帖</p>
+      <h1>账号管理</h1>
+      <p class="muted">查看发帖账号，或使用小黑盒 App 扫码切换。</p>
+    </header>
+    <div class="panels">
+      <section class="account-panel" aria-labelledby="account-title">
+        <h2 id="account-title">当前账号</h2>
+        <p id="account-state" class="badge" role="status" aria-live="polite">正在读取…</p>
+        <p id="account" class="account-name">正在读取账号…</p>
+        <p id="account-hint" class="note">登录状态检查完成后会显示在这里。</p>
+        <div class="account-actions">
+          <button id="check" type="button" class="secondary">检查登录态</button>
+          <button id="logout" type="button" class="danger">清除本地登录态</button>
+        </div>
+        <p class="note account-footnote">新账号确认成功后自动切换；扫码期间仍保留当前账号。</p>
+      </section>
+      <section aria-labelledby="qr-title">
+        <h2 id="qr-title">扫码登录 / 切换账号</h2>
+        <ol class="steps" aria-label="登录步骤">
+          <li>App 扫码</li><li>手机确认</li><li>自动保存</li>
+        </ol>
+        <div id="qr-stage" class="qr-stage" aria-busy="false">
+          <img id="qr" width="256" height="256" alt="使用小黑盒 App 扫描此二维码登录" hidden>
+          <div id="qr-placeholder" class="qr-placeholder">
+            <strong id="qr-placeholder-title">准备好小黑盒 App</strong>
+            <span id="qr-placeholder-hint">点击下方按钮获取登录二维码</span>
+          </div>
+        </div>
+        <p id="expiry" class="expiry"></p>
+        <p id="status" class="login-status" role="status" aria-live="polite">尚未开始</p>
+        <div class="qr-actions">
+          <button id="start" type="button">获取二维码</button>
+          <button id="cancel" type="button" class="secondary" disabled>取消扫码</button>
+        </div>
+        <details id="diagnostics" hidden>
+          <summary>查看连接详情</summary>
+          <p id="progress" class="note"></p>
+        </details>
+      </section>
+    </div>
+    <p id="operation" class="operation" role="status" aria-live="polite"></p>
     <p id="error" role="alert"></p>
-    <dialog id="logout-confirm" aria-labelledby="logout-title">
+    <details class="help">
+      <summary>扫码与凭据说明</summary>
+      <p class="note">二维码最长有效 120 秒，请只扫描当前显示的码。刷新后插件停止处理旧会话。手机确认后若仍显示等待，表示服务端尚未返回成功结果；过期后请获取新码。</p>
+      <p class="note">切换前会在插件数据目录保留一份旧凭据备份。清除本地登录态会同时删除备份，仅影响本插件。</p>
+    </details>
+    <dialog id="logout-confirm" aria-labelledby="logout-title" aria-describedby="logout-description">
       <form method="dialog">
         <h2 id="logout-title">清除本地登录态？</h2>
-        <p>将清除本插件的当前凭据和旧账号备份，之后需重新扫码或填写 Cookie。</p>
-        <button value="cancel" class="secondary" autofocus>取消</button>
-        <button value="logout">确认清除</button>
+        <p id="logout-description">将清除本插件的当前凭据和旧账号备份，并停止当前扫码。之后需重新扫码或填写 Cookie。</p>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary" autofocus>保留账号</button>
+          <button value="logout" class="danger">确认清除</button>
+        </div>
       </form>
     </dialog>
   </main>
