@@ -1,166 +1,109 @@
-# astrbot_plugin_heybox_poster
+# 📮 小黑盒发帖
 
-AstrBot 小黑盒发帖插件：把「发动态 / 发长文 / 存草稿」注册成 LLM 函数工具，同时保留手动指令。
+让 AstrBot 通过自然语言或指令，在小黑盒发动态、发长文和保存草稿。
 
-当前正式版本：**v0.5.3**，稳定分支：`main`。扫码登录已通过本机对照测试及用户部署端实机验收。
+**正式版本：v0.5.3** · **AstrBot：>=4.24.2,<5** · **稳定分支：`main`**
 
-> ⚠️ **安全提示**：`allowed_users` 留空时**仅 AstrBot 管理员**可发帖或删除（管理员由 AstrBot 全局 `admins_id` 判定）；显式填写后则只允许白名单内的用户。无法确认管理员身份时拒绝写操作，请先配置好管理员或白名单。
+## ✨ 功能
 
-## 特性
+- 发布动态、长文或草稿，支持公开、粉丝可见和仅自己可见。
+- 在 WebUI 扫码登录、切换账号、检查和清除本地登录态。
+- 搜索社区 / 话题，查询和删除自己的帖子。
+- 管理员与白名单权限、发帖冷却、重复请求拦截和发送异常对账。
 
-- LLM 工具与手动指令双通道
-- 支持动态（`dynamic`）与长文（`article`），以及草稿
-- 可见范围：公开 / 粉丝可见 / 仅自己可见
-- 话题搜索解析，或直接指定话题 ID
-- 风控识别，命中 `show_captcha` 时提示更新 Cookie
-- 白名单、冷却时间、`dry_run` 预演
-- WebUI 账号管理、扫码登录及切换；收到服务端确认和完整凭据后自动保存
-- 限流冷却落盘，插件重载或进程重启后继续生效
+## 🚀 安装与登录
 
-## 安装
+1. 将插件目录 `astrbot_plugin_heybox_poster` 放入 AstrBot 的 `data/plugins/`。
+2. 安装插件的 `requirements.txt` 依赖，然后重启 AstrBot 或重载插件。
+3. 打开 **AstrBot WebUI → 插件 → 小黑盒发帖 → 可视化视图 → 账号管理**。
+4. 点击「获取 / 刷新二维码」，用小黑盒 App 扫描当前二维码并确认，等待页面显示登录成功。
+5. 配置好权限、默认话题和可见范围；确认预演结果后，将 **`dry_run` 设为 `false`**，才会真正发帖或删除。
 
-1. 把整个 `astrbot_plugin_heybox_poster/` 目录放到 AstrBot 的 `data/plugins/` 下；
-2. 使用 AstrBot `>=4.24.2,<5`，安装插件的 `requirements.txt` 依赖并重启（或在 WebUI 插件页重载）；
-3. 登录 AstrBot WebUI → 插件 → 小黑盒发帖 → 可视化视图 → 账号管理，扫码登录。也可在插件配置手动填写 Cookie。
+每次使用一个发帖账号，再次扫码可切换。二维码过期后需重新获取；切换失败会保留原账号。账号页面需先登录 AstrBot Dashboard，聊天中的 `/xhh登录` 可查看入口提示。
 
-升级到 v0.2.0 时，插件目录下旧的 `outbox.sqlite3` 会自动迁移到 AstrBot 插件数据目录，去重与对账记录保留。
+**凭据保护：** 切换账号前会在插件数据目录保留一份旧凭据备份。插件配置和备份含明文登录凭据，请勿分享或提交到仓库。「清除本地登录态」会同时删除当前凭据和旧备份，不影响其他客户端的登录。
 
-### 获取 Cookie
+<details>
+<summary>手动导入 Cookie（可选）</summary>
 
-**优先使用内置账号管理页**：点击「获取 / 刷新二维码」，用小黑盒 App 扫码并确认。页面分别显示当前账号登录态和扫码进度，并显示本次会话编号、成功查询次数和最后响应时间。后台每 3 秒查询一次，失败时按 2 / 4 / 8 / 10 秒退避重试，最长 120 秒；过期后手动刷新，请只扫页面当前显示的码。
+在浏览器登录小黑盒后，打开开发者工具的 Network 面板，复制已登录请求中的完整 `Cookie`，填入插件配置的 `cookie`。
 
-当前插件使用一个发帖账号。再次扫码可以切换账号；只有服务端明确返回成功、取得 `user_pkey` 且账号 ID 唯一有效后才覆盖配置并重建客户端，失败时保留原账号。凭据既可来自 Cookie，也可来自 JSON 或嵌套的 user / account / profile / account_detail；缺少 `x_xhh_tokenid` 时按参考适配器公式生成客户端标识，设备标识随凭据保留。扫码保存不再以额外的 `restore_login` 请求作为前提。
+Cookie 需包含 `user_pkey` 与 `x_xhh_tokenid`，并建议填写当前账号的 `heybox_id`。扫码登录会自动填写这些配置。
 
-扫码校验从新会话响应或 Cookie 取得 ID，不使用旧账号 ID；检查现有登录态仍调用 `/account/restore_login` 并携带配置里的 ID。打开页面时自动检查已配置的账号，网络或响应异常显示「暂时无法验证」，仅明确的失效响应才显示「登录已失效」。`ready` 只表示已扫码、等待服务端确认结果；手机已确认但接口一直返回 `ready` 时不会假报成功，请等待或过期后获取新码。未知扫码状态继续等待，单次查询失败不结束会话。日志和页面只显示固定环节、异常类型及重试次数，不输出原始响应或凭据。
+</details>
 
-扫码请求使用网页登录客户端 `app=web`。v0.5.2 及更早版本错误继承了发帖客户端的 `app=heybox`，本机复现为手机确认后持续 `ready`；v0.5.3 已修复并通过本机手机扫码验证。
+## ✍️ 使用
 
-需要独立排查时，在插件目录执行 `python debug_qr.py`；执行 `python debug_qr.py --reference` 可用参考适配器的参数做对照。二维码和脱敏日志保存在 `.qr-debug/` 的独立会话目录，不写入插件配置或保存登录凭据。具体本机命令、实测结果与判断方式见 [扫码诊断记录](QR_LOGIN_DIAGNOSIS.md)。
+### 自然语言与 LLM 工具
 
-「清除本地登录态」确认后会立即删除当前凭据和旧备份，需要重新扫码或填写 Cookie 才能恢复。直接调用 `auth/logout` 也必须发送 JSON `{"confirm": true}`；缺失、字符串或数字确认值均会被拒绝。
+例如：“帮我在 Steam 社区发一条动态，标题是……，正文是……”。请确保当前模型已启用本插件工具。
 
-页面及 API 要求已登录的 AstrBot Dashboard 会话，通过内置 bridge 调用，不额外开放端口，不返回 Cookie。`/xhh登录` 为管理员提供页面入口提示。
-
-覆盖前会在 AstrBot 插件数据目录保留一份 `login_backup.json`，每次覆盖替换上一份；清除登录态时删除备份。**插件配置和备份含明文登录凭据**，请限制数据目录的读取权限，勿分享或提交。备份不随自定义 `outbox_path` 移动。
-
-以下为手动导入 Cookie 的替代方式。
-
-发帖接口依赖两个值：
-
-- `user_pkey`：登录态
-- `x_xhh_tokenid`：风控令牌（缺失时返回 `show_captcha`）
-
-三种拿法任选：
-
-**A. 用 xiaoheihe-cli（可扫码登录并自动维护）**
-
-```bash
-uv tool install git+https://github.com/AaronZ345/xiaoheihe-cli.git
-xiaoheihe-cli login          # 扫码
-xiaoheihe-cli auth status    # 确认已登录
-# 从会话文件取 cookie，或直接把 Cookie 头填进插件配置
-```
-
-**B. 浏览器复制**
-
-登录 <https://www.xiaoheihe.cn> → DevTools → Network → 任意请求 →
-复制请求头里的 `Cookie`，粘贴到插件配置 `cookie`（需包含 `user_pkey` 与 `x_xhh_tokenid`）。
-
-**C. 56dz 仓库的 `get_token.js`**
-
-```bash
-node get_token.js --attach 9333   # 附着已登录的 Chrome
-# 生成 cookie.json，把其中的 cookie 字段填进插件配置
-```
-
-## 配置项
-
-| 键 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `cookie` | string | 空 | 完整 Cookie；留空则用 `user_pkey` + `x_xhh_tokenid` 拼接 |
-| `user_pkey` | string | 空 | 登录态 Cookie 值 |
-| `x_xhh_tokenid` | string | 空 | 风控 Cookie 值；缺失会返回 `show_captcha` |
-| `heybox_id` | string | 空 | 当前账号 ID，作为公共参数发送 |
-| `default_topic_ids` | string | 空 | 默认话题 ID（逗号分隔） |
-| `view_limit` | int | 2 | 可见范围：1 公开 / 2 粉丝可见 / 3 仅自己可见 |
-| `allowed_users` | list | [] | 如 `qq:123`、`xhh:456`；裸 ID 兼容；空 = 仅管理员 |
-| `cooldown_seconds` | int | 60 | 同一用户两次发帖的最小间隔；0 = 不限制 |
-| `dry_run` | bool | true | 发帖只回显表单，删除只回显帖子 ID；不执行写操作 |
-| `request_timeout` | int | 20 | 单次请求超时（秒） |
-| `outbox_path` | string | 空 | 发帖 outbox 数据库路径；留空则用 AstrBot 插件数据目录 |
-| `outbox_dedup_seconds` | int | 600 | 同账号、同提交表单的成功发送去重窗口（秒）；未决任务持续阻止重发 |
-| `rate_limit_cooldown_seconds` | int | 600 | 命中限流后按账号、平台发送者持久化冷却；0 禁用 |
-| `outbox_purge_days` | int | 7 | 启动时清理多少天前的 failed 记录 |
-
-`allowed_users` 的判定顺序：显式白名单 > 管理员（官方 `is_admin()` 优先，其次比对全局 `admins_id`）；无法确认权限时拒绝发帖和删除。
-
-例如 `["qq:123", "xhh:456"]` 只放行 QQ 用户 123 和小黑盒用户 456。兼容别名 `aiocqhttp` / `qq_official` → `qq`、`heybox` / `xiaoheihe` → `xhh`；其他平台使用 AstrBot 的平台名。裸 ID `123` 会匹配各平台上的同名 ID，需要隔离时使用前缀。发帖白名单不授予账号页面权限。
-
-发帖结果未知（网络中断、HTTP 5xx、响应异常）时保留 outbox 记录，禁止相同请求重发；重启时对账未知任务和中断遗留的 `pending`。无法确认的记录不会自动解除，请先人工核实帖子，勿盲目重试。草稿不会通过公开帖子列表认领。
-
-去重按账号和完整表单区分草稿、正式发布、话题、类型及可见范围。填写 `heybox_id` 时用它标识账号；留空时使用 `user_pkey` 的散列，重新登录更换 `user_pkey` 后无法延续该账号标识，建议固定配置 `heybox_id`。升级前的记录没有账号信息，相同表单会保守继承到当前账号；升级时请保持原账号配置。
-
-## 使用
-
-### LLM 工具（模型自行调用）
-
-| 工具 | 作用 |
+| 工具 | 用途 |
 |---|---|
-| `xhh_account_status()` | 查登录态、昵称、heybox_id |
-| `xhh_search_topics(keyword)` | 搜社区/话题，最多返回 5 条，拿 `topic_id` |
-| `xhh_publish_post(title, text, topic, topic_ids, mode, draft)` | 发帖 / 存草稿 |
-| `xhh_my_posts(limit)` | 只读查询当前账号最近的帖子列表 |
+| `xhh_account_status` | 检查登录态、昵称和账号 ID |
+| `xhh_search_topics` | 搜索社区 / 话题，最多返回 5 条 |
+| `xhh_publish_post` | 发布动态、长文或保存草稿 |
+| `xhh_my_posts` | 查询当前账号最近的帖子 |
 
-给模型的提示词里建议加一句：
-
-> 发小黑盒时优先传明确的 `topic_ids`，未知时先用 `xhh_search_topics` 确认社区，避免同名社区误选；话题必填，正文控制在 1000 字内。
+**发帖必须指定话题。** 优先使用明确的 `topic_ids`；不确定时先搜索，也可配置 `default_topic_ids` 作为默认值。
 
 ### 手动指令
 
 ```text
-/xhh状态
 /xhh登录
+/xhh状态
 /xhh话题 Steam
-/xhh发帖 标题|正文|Steam
-/xhh删除 <link_id>
+/xhh发帖 标题|正文|话题名或ID
 /xhh我的帖子
+/xhh删除 帖子ID
 ```
 
-## 上游与协议
+`/xhh发帖` 发布动态；配置默认话题后，第三段可省略。长文与草稿通过 LLM 工具选择。
 
-本项目以 [MIT License](LICENSE) 发布。实现过程中参考了以下公开项目：
+## ⚙️ 配置
 
-| 项目 | 协议 | 用途 |
+常用选项可在 AstrBot 插件配置页面修改：
+
+| 配置项 | 默认值 | 说明 |
 |---|---|---|
-| [AaronZ345/xiaoheihe-cli](https://github.com/AaronZ345/xiaoheihe-cli) | MIT（© 2025 Li Fangyu） | `hkey` 签名变换、Workshop `_rnd` 公式、发帖表单字段、话题搜索接口 |
-| [56dz/xiaoheihe-api](https://github.com/56dz/xiaoheihe-api) | GPL-3.0 | `hkey` 算法说明；`tests/` 中 6 组真实抓包签名向量（仅测试数据） |
-| [ylty1516/xiaoheihe-agent](https://github.com/ylty1516/xiaoheihe-agent) | MIT（`pyproject.toml` 声明，仓库未附 LICENSE 文件） | 长文必填字段与发帖踩坑记录 |
-| [674537331/astrbot_plugin_xiaoheihe_adapter](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter) | MIT（© 2026 RyanVaderAn） | WebUI / Dashboard 鉴权、扫码凭据解析与重试方案参考，改编客户端标识公式，许可见 THIRD_PARTY_NOTICES.md |
+| `dry_run` | `true` | 发帖和删除只做预演；设为 `false` 后执行实际操作 |
+| `allowed_users` | `[]` | 留空仅管理员可发帖 / 删除；填写后按白名单放行 |
+| `default_topic_ids` | 空 | 默认话题 ID，多个用英文逗号分隔 |
+| `view_limit` | `2` | `1` 公开 / `2` 粉丝可见 / `3` 仅自己可见 |
+| `cooldown_seconds` | `60` | 同一用户的发帖间隔，单位秒；`0` 禁用 |
+| `rate_limit_cooldown_seconds` | `600` | 命中限流后的持久冷却，单位秒；`0` 禁用 |
+| `request_timeout` | `20` | 单次请求超时，单位秒 |
 
-另评估但未采用代码：[wsmxd/XiaoheiheMcpServer](https://github.com/wsmxd/XiaoheiheMcpServer)（MIT，Playwright 方案）。
+白名单建议使用平台前缀，例如 `["qq:123", "xhh:456"]`。裸 ID 会匹配各平台的同名 ID；白名单不授予账号页面权限。管理员由 AstrBot 的管理员身份及全局 `admins_id` 判定，无法确认权限时拒绝发帖和删除。
 
-第三方许可原文与引用范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+<details>
+<summary>凭据与存储选项</summary>
 
-离线回归与未完成的实机验证、P3 待办见 [TODO.md](TODO.md)。
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `cookie` | 空 | 完整 Cookie；留空时使用下面两个字段拼接 |
+| `user_pkey` | 空 | 登录凭据，扫码自动保存 |
+| `x_xhh_tokenid` | 空 | 客户端 Cookie，扫码自动保存 |
+| `heybox_id` | 空 | 当前账号 ID，扫码自动保存 |
+| `outbox_path` | 空 | 发送记录数据库路径，默认位于 AstrBot 插件数据目录 |
+| `outbox_dedup_seconds` | `600` | 同账号、相同提交表单的成功发送去重窗口，单位秒 |
+| `outbox_purge_days` | `7` | 启动时清理多少天前的失败记录 |
 
-本地检查（Python 3.12、Node.js 18+）：
+限流冷却按账号和平台发送者分别记录，重启后继续生效。正在发送或结果未知的请求会持续阻止重复提交，不受成功发送去重窗口限制。
 
-```bash
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-node tests/test_account_page.mjs
-```
+</details>
 
-### 协议兼容性说明
+## 💡 常见问题
 
-- xiaoheihe-cli 为 MIT，与本项目 MIT 兼容；其版权与许可声明已完整保留在 `THIRD_PARTY_NOTICES.md`。
-- 56dz/xiaoheihe-api 为 GPL-3.0。本项目**没有复制其源代码**，仅在 `tests/` 中使用 6 组输入/输出签名样本作回归校验；这类抓包数据不构成 GPL 代码的衍生作品，因此不影响本项目按 MIT 发布。
-- 如需完全规避该引用：删除 `tests/test_core.py` 中的 `SAMPLES` 常量与 `test_hkey_matches_captured_samples` 用例（或替换为你自己抓取的样本）即可，其余测试不依赖它。
+- **仅显示发布预演：** 检查 `dry_run` 是否仍为 `true`。
+- **没有发帖或删除权限：** 检查 AstrBot 管理员配置或 `allowed_users`；显式设置白名单后，发送者需要在名单内。
+- **登录失效或扫码卡住：** 获取新二维码重试；显示「暂时无法验证」时先检查网络。需要独立排查可参考[扫码诊断记录](QR_LOGIN_DIAGNOSIS.md)。
+- **发送结果未知：** 先在小黑盒核实帖子，避免重复发布。插件会保留发送记录并在重启时尝试对账；无法确认的记录不会自动放行，草稿也不会通过公开帖子列表确认。
 
-## 致谢
+## 📚 更多资料
 
-本项目由 [DeepSeek](https://www.deepseek.com/) 协助开发，并在 DeepSeek Harness 与 Codex 的支持下完成。
+[更新日志](CHANGELOG.md) · [验证与待办](TODO.md) · [扫码诊断](QR_LOGIN_DIAGNOSIS.md)
 
-## 许可
+本项目以 [MIT License](LICENSE) 发布。感谢 xiaoheihe-cli、小黑盒适配器等参考项目，完整引用与许可声明见[第三方声明](THIRD_PARTY_NOTICES.md)。
 
-本项目以 [MIT License](LICENSE) 发布，© 2026 Vdk1639。第三方组件与参考项目见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目由 DeepSeek 协助开发，并在 DeepSeek Harness 与 Codex 的支持下完成。
