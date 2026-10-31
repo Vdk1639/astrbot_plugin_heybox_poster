@@ -11,12 +11,12 @@ import urllib.request
 from http.cookiejar import CookieJar
 from http.cookies import SimpleCookie
 
-from .client import XhhClient, XhhError
+from .transport import XhhError, XhhTransport
 
 ID_KEYS = ("uid", "heybox_id", "user_heybox_id", "heyboxid", "user_id", "userid", "id")
 
 
-class QrLoginClient(XhhClient):
+class QrLoginClient(XhhTransport):
     def __init__(self, timeout: float = 20):
         super().__init__("", timeout=timeout)
         self._jar = CookieJar()

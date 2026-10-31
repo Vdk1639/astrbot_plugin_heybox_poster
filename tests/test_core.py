@@ -142,6 +142,17 @@ class PostFormTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_legacy_imports_preserve_error_types_and_post_helpers(self):
+        from astrbot_plugin_heybox_poster.core import client, post, transport
+
+        for name in ("CaptchaRequired", "NetworkError", "RateLimited", "XhhError"):
+            with self.subTest(name=name):
+                self.assertIs(getattr(client, name), getattr(transport, name))
+        for name in ("build_post_form", "account_key", "content_fingerprint",
+                     "LINK_TAG_DYNAMIC", "LINK_TAG_ARTICLE"):
+            with self.subTest(name=name):
+                self.assertIs(getattr(client, name), getattr(post, name))
+
     def _outbox(self) -> Outbox:
         path = ROOT / f".outbox_test_{uuid.uuid4().hex}.sqlite3"
         outbox = Outbox(str(path))

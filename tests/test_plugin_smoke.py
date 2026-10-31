@@ -126,6 +126,14 @@ class PluginSmokeTests(unittest.TestCase):
         plugin = self._plugin(cookie="", user_pkey="p", x_xhh_tokenid="t")
         self.assertEqual(plugin._cookie(), "user_pkey=p; x_xhh_tokenid=t")
 
+    def test_command_args_accepts_both_prefix_forms(self):
+        from astrbot.api.event import AstrMessageEvent
+
+        plugin = self._plugin()
+        for message in ("/xhh话题 Steam", "xhh话题 Steam", "Steam"):
+            with self.subTest(message=message):
+                self.assertEqual(plugin._command_args(AstrMessageEvent(message=message), "xhh话题"), "Steam")
+
     def test_account_config_change_rebuilds_client(self):
         plugin = self._plugin()
         plugin._get_outbox = lambda: None

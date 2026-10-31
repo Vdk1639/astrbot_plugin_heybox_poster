@@ -6,14 +6,18 @@
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | AstrBot 接入、权限、冷却和配置保存；指令与 LLM 工具共用 `_publish` |
-| `core/client.py` | HTTP、响应校验、发布表单、发送登记与对账 |
+| `main.py` | AstrBot 接入、权限、冷却和账号配置保存；指令与 LLM 工具共用 `_publish` |
+| `core/transport.py` | 共用签名 HTTP 请求、响应校验与错误类型 |
+| `core/client.py` | 账号、话题、帖子、评论业务 API；发送登记与对账 |
+| `core/post.py` | 帖子表单、账号标识与内容指纹；`core.client` 保留旧导入路径 |
 | `core/outbox.py` | SQLite 原子去重、未知结果和持久冷却 |
 | `core/login.py` | 隔离的扫码会话、凭据提取与身份校验 |
 | `core/web.py` | Dashboard 鉴权、扫码任务和账号页面 API |
 | `core/sign.py` | 请求签名；测试含抓包样本 |
 | `pages/account/` | 通过 AstrBot bridge 访问 API 的账号页面 |
 | `debug_qr.py` | 独立扫码诊断；不保存凭据 |
+
+发帖与扫码分别继承 `XhhTransport`；请求层不依赖业务模块。后续评论、通知等能力复用这层签名、请求和错误处理；各业务的表单或轮询状态放在对应模块，不堆入 AstrBot 指令入口。现有 `XhhClient.comment` 尚未暴露为插件指令，接入时复用它；通知轮询需由插件生命周期启动和取消，与扫码轮询分开管理。
 
 ## 本地验证
 

@@ -23,10 +23,9 @@ from .core.client import (
     RateLimited,
     XhhClient,
     XhhError,
-    account_key,
-    build_post_form,
 )
 from .core.outbox import Outbox
+from .core.post import account_key, build_post_form
 
 PLUGIN_NAME = "astrbot_plugin_heybox_poster"
 PLUGIN_VERSION = Path(__file__).with_name("VERSION").read_text(encoding="ascii").strip()
@@ -148,6 +147,61 @@ class XhhPosterPlugin(Star):
             return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "outbox.sqlite3"
         except Exception:
             return Path(__file__).resolve().parent / "outbox.sqlite3"
+
+    def _save_login(self, cookie: str, status: dict) -> None:
+        from http.cookies import SimpleCookie
+
+        parsed = SimpleCookie(cookie)
+        if (not parsed.get("user_pkey") or not parsed["user_pkey"].value
+                or not parsed.get("x_xhh_tokenid") or not parsed["x_xhh_tokenid"].value
+                or not str(status.get("user_id") or "").isascii()
+                or not str(status.get("user_id") or "").isdigit()):
+            raise XhhError("登录凭据或账号 ID 无效，原登录态未替换")
+        values = {
+            "cookie": cookie, "user_pkey": parsed["user_pkey"].value,
+            "x_xhh_tokenid": parsed["x_xhh_tokenid"].value, "heybox_id": str(status["user_id"]),
+        }
+        self._save_credentials(values)
+
+    def _save_credentials(self, values: dict, *, backup: bool = True) -> None:
+        old = {key: self._c(key, "") for key in values}
+        save = getattr(self.config, "save_config", None)
+        if not callable(save):
+            raise XhhError("宿主不支持保存插件配置，原登录态未替换")
+        self._get_outbox()
+        # 提前检查客户端配置，避免凭据写入后才发现无法重建客户端。
+        float(self._c("request_timeout", 20) or 20)
+        backup_path = self._default_outbox_path().parent / "login_backup.json"
+        if backup and any(old.values()):
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=backup_path.parent, delete=False
+                ) as file:
+                    temporary = Path(file.name)
+                    json.dump(old, file, ensure_ascii=False)
+                temporary.replace(backup_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        self.config.update(values)
+        try:
+            save()
+        except Exception:
+            self.config.update(old)
+            try:
+                save()
+            except Exception:
+                logger.warning(f"[{PLUGIN_NAME}] 登录配置回滚失败，请检查配置文件权限")
+            raise XhhError("登录配置保存失败，内存中的原登录态已恢复") from None
+        if self._client is not None:
+            asyncio.create_task(self._client.close())
+            self._client = None
+        if self._cookie():
+            self._get_client()
+        if not backup:
+            backup_path.unlink(missing_ok=True)
 
     async def terminate(self) -> None:
         if self.web is not None:
@@ -324,6 +378,14 @@ class XhhPosterPlugin(Star):
                 f"path={exc.path}"
             )
 
+    @staticmethod
+    def _command_args(event: AstrMessageEvent, command: str) -> str:
+        raw = event.message_str.strip()
+        for prefix in (f"/{command}", command):
+            if raw.startswith(prefix):
+                return raw[len(prefix):].strip()
+        return raw
+
     # ------------------------------------------------------------------
     # 手动指令
     # ------------------------------------------------------------------
@@ -336,61 +398,6 @@ class XhhPosterPlugin(Star):
         yield event.plain_result(
             "请登录 AstrBot WebUI → 插件 → 小黑盒发帖 → 可视化视图 → 账号管理，扫码登录或切换账号。"
         )
-
-    def _save_login(self, cookie: str, status: dict) -> None:
-        from http.cookies import SimpleCookie
-
-        parsed = SimpleCookie(cookie)
-        if (not parsed.get("user_pkey") or not parsed["user_pkey"].value
-                or not parsed.get("x_xhh_tokenid") or not parsed["x_xhh_tokenid"].value
-                or not str(status.get("user_id") or "").isascii()
-                or not str(status.get("user_id") or "").isdigit()):
-            raise XhhError("登录凭据或账号 ID 无效，原登录态未替换")
-        values = {
-            "cookie": cookie, "user_pkey": parsed["user_pkey"].value,
-            "x_xhh_tokenid": parsed["x_xhh_tokenid"].value, "heybox_id": str(status["user_id"]),
-        }
-        self._save_credentials(values)
-
-    def _save_credentials(self, values: dict, *, backup: bool = True) -> None:
-        old = {key: self._c(key, "") for key in values}
-        save = getattr(self.config, "save_config", None)
-        if not callable(save):
-            raise XhhError("宿主不支持保存插件配置，原登录态未替换")
-        self._get_outbox()
-        # 提前检查客户端配置，避免凭据写入后才发现无法重建客户端。
-        float(self._c("request_timeout", 20) or 20)
-        backup_path = self._default_outbox_path().parent / "login_backup.json"
-        if backup and any(old.values()):
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", encoding="utf-8", dir=backup_path.parent, delete=False
-                ) as file:
-                    temporary = Path(file.name)
-                    json.dump(old, file, ensure_ascii=False)
-                temporary.replace(backup_path)
-            finally:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
-        self.config.update(values)
-        try:
-            save()
-        except Exception:
-            self.config.update(old)
-            try:
-                save()
-            except Exception:
-                logger.warning(f"[{PLUGIN_NAME}] 登录配置回滚失败，请检查配置文件权限")
-            raise XhhError("登录配置保存失败，内存中的原登录态已恢复") from None
-        if self._client is not None:
-            asyncio.create_task(self._client.close())
-            self._client = None
-        if self._cookie():
-            self._get_client()
-        if not backup:
-            backup_path.unlink(missing_ok=True)
 
     @filter.command("xhh状态")
     async def cmd_status(self, event: AstrMessageEvent):
@@ -414,11 +421,7 @@ class XhhPosterPlugin(Star):
         if not self._is_allowed(event):
             yield event.plain_result("你没有发帖权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。")
             return
-        raw = event.message_str.strip()
-        for prefix in ("/xhh发帖", "xhh发帖"):
-            if raw.startswith(prefix):
-                raw = raw[len(prefix):].strip()
-                break
+        raw = self._command_args(event, "xhh发帖")
         parts = [p.strip() for p in raw.split("|")]
         if len(parts) < 2 or not parts[0] or not parts[1]:
             yield event.plain_result("用法：/xhh发帖 标题|正文|话题名或ID（第三段可省略，用默认话题）")
@@ -432,11 +435,7 @@ class XhhPosterPlugin(Star):
     @filter.command("xhh话题")
     async def cmd_topics(self, event: AstrMessageEvent):
         """搜话题/社区 ID：/xhh话题 Steam"""
-        keyword = event.message_str.strip()
-        for prefix in ("/xhh话题", "xhh话题"):
-            if keyword.startswith(prefix):
-                keyword = keyword[len(prefix):].strip()
-                break
+        keyword = self._command_args(event, "xhh话题")
         if not keyword:
             yield event.plain_result("用法：/xhh话题 关键词")
             return
@@ -457,12 +456,7 @@ class XhhPosterPlugin(Star):
         if not self._is_allowed(event):
             yield event.plain_result("你没有删除权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。")
             return
-        raw = event.message_str.strip()
-        for prefix in ("/xhh删除", "xhh删除"):
-            if raw.startswith(prefix):
-                raw = raw[len(prefix):].strip()
-                break
-        link_id = raw.strip()
+        link_id = self._command_args(event, "xhh删除")
         if not link_id:
             yield event.plain_result("用法：/xhh删除 <link_id>")
             return
