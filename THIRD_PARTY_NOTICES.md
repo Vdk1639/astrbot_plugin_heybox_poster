@@ -2,7 +2,7 @@
 
 本项目 **astrbot_plugin_heybox_poster** 以 [MIT License](LICENSE) 发布。
 
-开发过程中参考了下列公开项目，改编代码及测试数据的范围如下。
+本项目包含下列项目的改编代码、面板资源及测试数据。各部分的来源和保留声明如下。
 
 ## xiaoheihe-cli — MIT
 
@@ -47,10 +47,22 @@ SOFTWARE.
 
 ## astrbot_plugin_xiaoheihe_adapter — MIT
 
-`core/login.py` 参考其扫码状态、JSON 凭据解析与轮询方案，客户端标识生成公式
-改编自其 `xiaoheihe/request_signing.py`。保留完整许可：
+- 上游项目：<https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter>
+- 原作者及版权人：RyanVaderAn，Copyright (c) 2026 RyanVaderAn。
+- 本次整合来源：工作区提供的上游仓库副本，其 `metadata.yaml` 声明版本为 v1.3.2；该副本不含可核实的 Git 提交信息，不标注未经确认的提交哈希。
+- 完整原始许可：[third_party/xiaoheihe-adapter.LICENSE](third_party/xiaoheihe-adapter.LICENSE)，从该副本的根目录 `LICENSE` 原样保留。
+
+`dev` 整合直接复制并改编了上游 `xiaoheihe/` 运行时与原生平台模块（包括认证、签名、数据库、通知、主动浏览、事件与模型上下文等），将上游插件入口相关逻辑整理到 `community.py`，并将上游测试复制、适配为 `adapter_tests/`。这些部分是代码整合，不只是实现思路参考。
+
+管理面板从上游 `pages/xiaoheihe/` 复制至 `pages/account/`，保留其 HTML、样式、浏览来源逻辑和图标；本项目修改插件身份及 API 归属，并加入统一发帖/评论编辑审核、认证 bridge、响应竞争保护和离线交互测试。
+
+整合后的平台类型改为 `heybox_community`，显示为“小黑盒（发帖与评论）”，通过本项目发布服务与审核队列连接原发帖能力；原生平台和面板的上游版权归属不变。
+
+此前 `core/login.py` 已参考其扫码状态、JSON 凭据解析与轮询方案，客户端标识生成公式改编自其 `xiaoheihe/request_signing.py`。
 
 `debug_qr.py` 的对照模式采用其 GET 公共参数与请求头；网络传输、诊断记录和凭据检查复用本项目现有客户端。
+
+以下保留 MIT 许可正文；上游原文件另附于上述许可路径。发布或分发整合代码时应同时保留这些声明。
 
 ```text
 MIT License

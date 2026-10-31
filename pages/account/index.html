@@ -1,74 +1,287 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>小黑盒发帖 · 账号管理</title>
-  <link rel="stylesheet" href="./style.css">
-</head>
-<body>
-  <main>
-    <header class="page-header">
-      <p class="eyebrow">小黑盒发帖</p>
-      <h1>账号管理</h1>
-      <p class="muted">查看发帖账号，或使用小黑盒 App 扫码切换。</p>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>小黑盒统一管理 · Heybox Poster</title>
+    <link rel="icon" href="./assets/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./sources.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">ASTRBOT HEYBOX POSTER</p>
+        <h1>小黑盒统一管理</h1>
+        <p id="hero-summary">统一账号档案、发帖与评论、浏览来源和人工审核。</p>
+      </div>
+      <button id="refresh-all" class="secondary">刷新总览</button>
     </header>
-    <div class="panels">
-      <section class="account-panel" aria-labelledby="account-title">
-        <h2 id="account-title">当前账号</h2>
-        <p id="account-state" class="badge" role="status" aria-live="polite">正在读取…</p>
-        <p id="account" class="account-name">正在读取账号…</p>
-        <p id="account-hint" class="note">登录状态检查完成后会显示在这里。</p>
-        <div class="account-actions">
-          <button id="check" type="button" class="secondary">检查登录态</button>
-          <button id="logout" type="button" class="danger">清除本地登录态</button>
+
+    <div id="alerts" class="alerts" aria-live="polite"></div>
+
+    <nav class="tabs" aria-label="管理模块">
+      <button data-tab="overview" class="active">状态总览</button>
+      <button data-tab="login">扫码登录</button>
+      <button data-tab="publishing">发布编辑</button>
+      <button data-tab="post-reviews">发帖审核</button>
+      <button data-tab="comment-reviews">评论审核</button>
+      <button data-tab="settings">设置</button>
+      <button data-tab="sources">浏览来源</button>
+      <button data-tab="events">事件记录</button>
+      <button data-tab="feed">历史主动评论审核</button>
+      <button data-tab="logs">运行日志</button>
+      <button data-tab="storage">存储管理</button>
+    </nav>
+
+    <main>
+      <section id="overview" class="panel active">
+        <div id="status-cards" class="card-grid"></div>
+        <div class="surface">
+          <h2>发布状态</h2>
+          <div id="publishing-status" class="card-grid" aria-live="polite"></div>
         </div>
-        <p class="note account-footnote">新账号确认成功后自动切换；扫码期间仍保留当前账号。</p>
+        <div class="surface">
+          <h2>适配器实例</h2>
+          <p>新增机器人请选择“小黑盒（发帖与评论）”，平台类型为 heybox_community。</p>
+          <div id="adapter-list" class="table-wrap"></div>
+        </div>
+        <div class="surface">
+          <h2>辅助模型冷却</h2>
+          <p>图片转述或楼层上下文压缩模型失败后会短暂冷却；可在这里手动提前恢复尝试。</p>
+          <div id="provider-cooldown-list" class="table-wrap"></div>
+        </div>
       </section>
-      <section aria-labelledby="qr-title">
-        <h2 id="qr-title">扫码登录 / 切换账号</h2>
-        <ol id="login-steps" class="steps" aria-label="登录步骤">
-          <li id="step-1"><span id="step-1-number" class="step-number" aria-hidden="true">1</span><span class="step-label">App 扫码</span><span id="step-1-state" class="step-state">未开始</span></li>
-          <li id="step-2"><span id="step-2-number" class="step-number" aria-hidden="true">2</span><span class="step-label">手机确认</span><span id="step-2-state" class="step-state">未开始</span></li>
-          <li id="step-3"><span id="step-3-number" class="step-number" aria-hidden="true">3</span><span class="step-label">自动保存</span><span id="step-3-state" class="step-state">未开始</span></li>
-        </ol>
-        <div id="qr-stage" class="qr-stage" aria-busy="false">
-          <img id="qr" width="256" height="256" alt="使用小黑盒 App 扫描此二维码登录" hidden>
-          <div id="qr-placeholder" class="qr-placeholder">
-            <strong id="qr-placeholder-title">准备好小黑盒 App</strong>
-            <span id="qr-placeholder-hint">点击下方按钮获取登录二维码</span>
+
+      <section id="login" class="panel">
+        <div class="two-column">
+          <div class="surface">
+            <h2>账号档案</h2>
+            <label>profile_id
+              <select id="login-profile"></select>
+            </label>
+            <div class="button-row">
+              <button id="request-qr">生成二维码</button>
+              <button id="check-login" class="secondary">检查登录</button>
+              <button id="logout" class="danger">安全退出</button>
+            </div>
+            <dl id="login-facts" class="facts"></dl>
+          </div>
+          <div class="surface qr-surface">
+            <div id="qr-placeholder">尚未生成二维码</div>
+            <img id="qr-image" alt="小黑盒扫码登录二维码" hidden />
+            <p id="qr-countdown"></p>
           </div>
         </div>
-        <p id="expiry" class="expiry"></p>
-        <p id="status" class="login-status" role="status" aria-live="polite">尚未开始</p>
-        <div class="qr-actions">
-          <button id="start" type="button">获取二维码</button>
-          <button id="cancel" type="button" class="secondary" disabled>取消扫码</button>
+      </section>
+
+      <section id="publishing" class="panel">
+        <div class="surface">
+          <h2>发布编辑</h2>
+          <p>使用扫码登录中的同一套账号档案。模拟运行、默认档案及审核开关在“设置 → 发布管理”中配置。</p>
+          <p id="publishing-policy" class="result" aria-live="polite"></p>
+          <form id="publish-form">
+            <div class="config-grid">
+              <label>发布账号档案<select id="publish-profile" required></select></label>
+              <label>内容类型<select id="publish-kind"><option value="post">帖子</option><option value="comment">评论</option></select></label>
+            </div>
+            <fieldset id="post-fields">
+              <legend>帖子</legend>
+              <label>标题<input id="post-title" maxlength="200" /></label>
+              <div class="config-grid">
+                <label>帖子类型<select id="post-mode"><option value="dynamic">动态</option><option value="article">长文</option></select></label>
+                <label>可见范围<select id="post-view-limit"><option value="1">公开</option><option value="2">粉丝可见</option><option value="3">仅自己可见</option></select></label>
+                <label>话题 ID（逗号或空格分隔）<input id="post-topics" placeholder="例如：1, 2" /></label>
+                <label class="config-toggle"><span>保存为草稿</span><input id="post-draft" type="checkbox" /></label>
+              </div>
+            </fieldset>
+            <fieldset id="comment-fields" hidden disabled>
+              <legend>评论目标</legend>
+              <label>帖子 ID<input id="comment-post-id" required /></label>
+              <div class="config-grid">
+                <label>父评论 ID（可选）<input id="comment-parent-id" /></label>
+                <label>根评论 ID（可选）<input id="comment-root-id" /></label>
+              </div>
+            </fieldset>
+            <label>正文<textarea id="publish-text" required rows="8" placeholder="填写帖子或评论内容；长文按原文提交，审核区仅展示文本。"></textarea></label>
+            <div class="button-row"><button id="publish-submit" type="submit">提交内容</button></div>
+          </form>
+          <p id="publish-result" class="result" role="status" aria-live="polite"></p>
         </div>
-        <details id="diagnostics" hidden>
-          <summary>查看连接详情</summary>
-          <p id="progress" class="note"></p>
-        </details>
+      </section>
+
+      <section id="post-reviews" class="panel">
+        <div class="surface">
+          <div class="section-heading"><div><h2>发帖审核</h2><p>显示最近 100 条记录，包含待审核、发送中、已发送、已拒绝、失败和结果未知。仅待审核可操作；发送结果未知时请先到小黑盒核对，不能重发。</p></div><button id="refresh-post-reviews" class="secondary">刷新发帖审核</button></div>
+          <div id="post-review-list" class="candidate-list" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section id="comment-reviews" class="panel">
+        <div class="surface">
+          <div class="section-heading"><div><h2>评论审核</h2><p>显示最近 100 条手动、通知及主动评论的全部状态记录，仅待审核可操作。整合前遗留候选可在“历史主动评论审核”中处理。</p></div><button id="refresh-comment-reviews" class="secondary">刷新评论审核</button></div>
+          <div id="comment-review-list" class="candidate-list" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section id="settings" class="panel">
+        <div class="surface">
+          <div class="section-heading">
+            <div>
+              <h2>统一插件配置</h2>
+              <p>AstrBot 原生插件设置与本页共享同一个配置对象；保存后按需热重载后台任务。</p>
+            </div>
+            <div class="button-row">
+              <button id="save-config">校验并保存</button>
+              <button id="restore-defaults" class="secondary">恢复默认</button>
+            </div>
+          </div>
+          <div id="config-form" class="config-form" aria-label="插件配置表单"></div>
+          <p id="config-result" class="result"></p>
+        </div>
+      </section>
+
+      <section id="sources" class="panel">
+        <div class="surface">
+          <div class="section-heading">
+            <div>
+              <h2>主动浏览来源</h2>
+              <p>探测使用扫码登录页当前选择的账号档案。真实分区优先；仅在未选择真实分区或全部真实分区请求失败时，才使用兼容/回退推荐流分类。</p>
+            </div>
+            <span id="source-mode-badge" class="source-badge">读取中</span>
+          </div>
+
+          <div class="source-summary-card">
+            <div>
+              <p class="source-kicker">真实分区浏览（推荐）</p>
+              <strong id="source-summary-names">尚未选择真实分区</strong>
+              <p id="source-summary-count">0 个分区</p>
+            </div>
+            <div class="button-row">
+              <button id="probe-topics" class="secondary" type="button">探测/刷新真实分区</button>
+              <button id="edit-topic-selection" type="button">修改选择</button>
+            </div>
+          </div>
+          <p id="topic-probe-status" class="result">打开本页后会读取当前浏览来源配置。</p>
+
+          <div id="topic-selection-editor" class="source-editor" hidden>
+            <div class="section-heading compact-heading">
+              <div>
+                <h3>选择真实分区</h3>
+                <p>最多选择 20 个。支持按分区名称、所属组或 topic_id 搜索。</p>
+              </div>
+              <strong id="topic-selection-count">0 / 20</strong>
+            </div>
+            <input id="topic-search" type="search" placeholder="搜索：数码硬件、情投一盒、无畏契约、topic_id…" />
+            <div id="topic-probe-list" class="topic-probe-list"></div>
+            <div class="button-row source-actions">
+              <button id="save-topic-selection" type="button" disabled>保存真实分区</button>
+              <button id="cancel-topic-selection" class="secondary" type="button">取消</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="surface">
+          <div class="section-heading">
+            <div>
+              <h2>兼容/回退推荐流分类</h2>
+              <p>在没有选择任何真实分区时，以及所选真实分区本轮全部请求失败时生效。支持多选；“全部”与其他分类互斥。</p>
+            </div>
+            <button id="save-fallback-sources" type="button">保存回退分类</button>
+          </div>
+          <p id="fallback-source-status" class="result"></p>
+          <div id="fallback-source-list" class="fallback-source-grid"></div>
+        </div>
+      </section>
+
+      <section id="events" class="panel">
+        <div class="surface">
+          <div class="filters">
+            <select id="event-status">
+              <option value="">全部状态</option>
+              <option value="sent">已发送</option><option value="generated">已生成</option><option value="dry_run">模拟运行</option><option value="ignored">已忽略</option>
+              <option value="retry_wait">等待重试</option><option value="send_unknown">发送状态未知</option>
+              <option value="dead_letter">处理失败</option><option value="dispatched">已提交 AI</option>
+            </select>
+            <input id="event-uid" placeholder="用户 UID" />
+            <input id="event-post" placeholder="帖子 ID" />
+            <input id="event-keyword" placeholder="关键词" />
+            <input id="event-start" type="datetime-local" aria-label="开始时间" />
+            <input id="event-end" type="datetime-local" aria-label="结束时间" />
+            <button id="search-events">查询</button>
+          </div>
+          <div id="event-table" class="table-wrap"></div>
+          <div class="button-row pagination">
+            <button id="event-prev" class="secondary">上一页</button>
+            <span id="event-page">第 1 页</span>
+            <button id="event-next" class="secondary">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="feed" class="panel">
+        <div class="surface">
+          <div class="section-heading">
+            <div>
+              <h2>历史主动评论审核</h2>
+              <p>仅处理整合前的遗留候选；确认后绑定当前账号并转入统一“评论审核”，不会直接发送，仍需再次批准。新主动评论直接进入统一审核。</p>
+            </div>
+            <button id="reject-expired" class="danger secondary">拒绝 72 小时前候选</button>
+          </div>
+          <div id="candidate-list" class="candidate-list"></div>
+        </div>
+      </section>
+
+      <section id="logs" class="panel">
+        <div class="surface">
+          <div class="filters">
+            <select id="log-level"><option value="">全部级别</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+            <input id="log-keyword" placeholder="日志关键词" />
+            <button id="search-logs">筛选</button>
+            <button id="copy-diagnostics" class="secondary">复制脱敏诊断</button>
+          </div>
+          <div id="sse-state" class="sse-state">打开运行日志时连接 SSE</div>
+          <pre id="log-output" class="log-output"></pre>
+          <div id="diagnostics-fallback" class="diagnostics-fallback" hidden>
+            <p>当前页面的剪贴板权限受限，请长按或全选下面的脱敏诊断并复制。</p>
+            <textarea id="diagnostics-output" readonly aria-label="脱敏诊断内容"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <section id="storage" class="panel">
+        <div id="storage-cards" class="card-grid"></div>
+        <div class="surface">
+          <div class="section-heading">
+            <h2>安全清理</h2>
+            <div class="button-row">
+              <button id="preview-cleanup" class="secondary">清理预览</button>
+              <button id="run-cleanup" class="danger">执行清理</button>
+            </div>
+          </div>
+          <pre id="cleanup-output"></pre>
+        </div>
+      </section>
+    </main>
+
+    <div id="confirm-overlay" class="confirm-overlay" hidden>
+      <section
+        class="confirm-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-message"
+      >
+        <h2 id="confirm-title">请确认操作</h2>
+        <p id="confirm-message"></p>
+        <div class="button-row confirm-actions">
+          <button id="confirm-cancel" class="secondary" type="button">取消</button>
+          <button id="confirm-accept" type="button">确认</button>
+        </div>
       </section>
     </div>
-    <p id="operation" class="operation" role="status" aria-live="polite"></p>
-    <p id="error" role="alert"></p>
-    <details class="help">
-      <summary>扫码与凭据说明</summary>
-      <p class="note">二维码最长有效 120 秒，请只扫描当前显示的码。刷新后插件停止处理旧会话。手机确认后若仍显示等待，表示服务端尚未返回成功结果；过期后请获取新码。</p>
-      <p class="note">切换前会在插件数据目录保留一份旧凭据备份。清除本地登录态会同时删除备份，仅影响本插件。</p>
-    </details>
-    <dialog id="logout-confirm" aria-labelledby="logout-title" aria-describedby="logout-description">
-      <form method="dialog">
-        <h2 id="logout-title">清除本地登录态？</h2>
-        <p id="logout-description">将清除本插件的当前凭据和旧账号备份，并停止当前扫码。之后需重新扫码或填写 Cookie。</p>
-        <div class="dialog-actions">
-          <button value="cancel" class="secondary" autofocus>保留账号</button>
-          <button value="logout" class="danger">确认清除</button>
-        </div>
-      </form>
-    </dialog>
-  </main>
-  <script type="module" src="./app.js"></script>
-</body>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="./app.js"></script>
+    <script type="module" src="./topic_probe.js"></script>
+  </body>
 </html>

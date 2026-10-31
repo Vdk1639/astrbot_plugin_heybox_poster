@@ -12,9 +12,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install QR rendering dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
-      - name: Check account page interactions
-        run: node tests/test_account_page.mjs
+      - name: Run native adapter tests
+        run: python -m pytest adapter_tests -q
+      - name: Check dashboard interactions
+        run: node tests/test_dashboard.mjs

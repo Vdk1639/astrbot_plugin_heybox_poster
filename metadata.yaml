@@ -1,6 +1,6 @@
 name: astrbot_plugin_heybox_poster
-display_name: 小黑盒发帖
-desc: 让 LLM 在小黑盒发动态/长文/草稿；内置 hkey 与 Workshop _rnd 签名，支持话题搜索与登录态检查
+display_name: 小黑盒（发帖与评论）
+desc: 统一管理多账号扫码、动态/长文/草稿、评论审核、通知轮询与主动浏览；内置小黑盒原生平台和管理面板
 version: v0.6.0
 astrbot_version: ">=4.26.0,<5"
 author: Vdk1639

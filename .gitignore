@@ -10,3 +10,16 @@ outbox.sqlite3*
 login_backup.json
 .qr-debug/
 /tools/sync_version.py
+
+*.sqlite3*
+*.db*
+credentials/
+legacy_login_backup.json
+integration_migrated.json
+settings_migrated.json
+work/
+.test-tmp*/
+.test-results*/
+.test-runs/
+.login_test_*/
+pytest-cache-files-*/

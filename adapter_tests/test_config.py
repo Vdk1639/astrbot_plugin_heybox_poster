@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+import copy
+
+import pytest
+
+from xiaoheihe.config_service import (
+    DEFAULT_CONFIG,
+    ConfigService,
+    ConfigValidationError,
+)
+
+
+def test_config_defaults_and_profile(fake_config) -> None:
+    fake_config.pop("network")
+    fake_config.pop("providers")
+    service = ConfigService(fake_config)
+    assert service.profile("default")["dry_run"] is True
+    assert service.snapshot()["network"]["max_pending_events"] == 50
+    assert service.snapshot()["providers"] == {
+        "llm_provider_id": "",
+        "image_provider_id": "",
+        "context_provider_id": "",
+    }
+    assert service.snapshot()["context"]["thread_reply_post_chars"] == 1600
+    assert service.snapshot()["context"]["thread_reply_recent_comments"] == 12
+    assert service.snapshot()["context"]["enable_thread_reply_compression"] is True
+    assert service.snapshot()["context"]["thread_reply_compression_trigger_chars"] == 2400
+    assert service.snapshot()["context"]["thread_reply_compressed_post_chars"] == 700
+    assert service.snapshot()["context"]["thread_reply_compressed_comments_chars"] == 1400
+    assert service.snapshot()["context"]["thread_reply_compressed_image_chars"] == 800
+    assert service.snapshot()["context"]["context_cache_ttl_seconds"] == 60
+    assert service.snapshot()["context"]["image_total_timeout_seconds"] == 240
+    assert service.snapshot()["reply"]["provider_fallback_grace_seconds"] == 60
+
+
+def test_legacy_unused_image_byte_limit_settings_are_dropped(fake_config) -> None:
+    fake_config["context"]["max_image_size_mb"] = 8
+    fake_config["context"]["max_total_image_size_mb"] = 24
+    fake_config["retention"]["image_cache_soft_limit_mb"] = 200
+
+    snapshot = ConfigService(fake_config).snapshot()
+
+    assert "max_image_size_mb" not in snapshot["context"]
+    assert "max_total_image_size_mb" not in snapshot["context"]
+    assert "image_cache_soft_limit_mb" not in snapshot["retention"]
+
+
+@pytest.mark.asyncio
+async def test_config_save_uses_same_object_and_callback(fake_config) -> None:
+    service = ConfigService(fake_config)
+    changed_seen = []
+
+    async def callback(changed):
+        changed_seen.append(changed)
+
+    service.add_restart_callback(callback)
+    candidate = service.snapshot()
+    candidate["reply"]["max_reply_chars"] = 450
+    changed = await service.save(candidate)
+    assert fake_config["reply"]["max_reply_chars"] == 450
+    assert fake_config.save_count == 1
+    assert changed == {"reply"}
+    assert changed_seen == [{"reply"}]
+
+
+@pytest.mark.asyncio
+async def test_config_allows_explicit_unreviewed_proactive_send(fake_config) -> None:
+    service = ConfigService(fake_config)
+    candidate = copy.deepcopy(DEFAULT_CONFIG)
+    candidate["proactive_feed"].update(
+        {"enabled": True, "dry_run": False, "review_required": False}
+    )
+    changed = await service.save(candidate)
+    assert changed == {"proactive_feed"}
+    assert service.snapshot()["proactive_feed"] == candidate["proactive_feed"]
+
+
+def test_config_rejects_duplicate_profile(fake_config) -> None:
+    fake_config["profiles"].append(copy.deepcopy(fake_config["profiles"][0]))
+    with pytest.raises(ConfigValidationError, match="重复"):
+        ConfigService(fake_config)
+
+
+def test_config_rejects_unsafe_storage_and_timeout_values(fake_config) -> None:
+    fake_config["retention"]["database_warn_mb"] = 300
+    fake_config["retention"]["database_soft_limit_mb"] = 200
+    with pytest.raises(ConfigValidationError, match="软上限"):
+        ConfigService(fake_config)
+
+    safe = copy.deepcopy(DEFAULT_CONFIG)
+    safe["network"]["request_timeout_seconds"] = 0
+    with pytest.raises(ConfigValidationError, match="request_timeout_seconds"):
+        ConfigService(safe)
+
+    invalid_context = copy.deepcopy(DEFAULT_CONFIG)
+    invalid_context["context"]["thread_reply_recent_comments"] = 0
+    with pytest.raises(ConfigValidationError, match="thread_reply_recent_comments"):
+        ConfigService(invalid_context)
+
+    invalid_compression = copy.deepcopy(DEFAULT_CONFIG)
+    invalid_compression["context"]["thread_reply_compressed_post_chars"] = 100
+    with pytest.raises(ConfigValidationError, match="thread_reply_compressed_post_chars"):
+        ConfigService(invalid_compression)
+
+    invalid_image_budget = copy.deepcopy(DEFAULT_CONFIG)
+    invalid_image_budget["context"]["image_total_timeout_seconds"] = 601
+    with pytest.raises(ConfigValidationError, match="image_total_timeout_seconds"):
+        ConfigService(invalid_image_budget)
+
+    invalid_fallback_grace = copy.deepcopy(DEFAULT_CONFIG)
+    invalid_fallback_grace["reply"]["provider_fallback_grace_seconds"] = 301
+    with pytest.raises(ConfigValidationError, match="provider_fallback_grace_seconds"):
+        ConfigService(invalid_fallback_grace)
+
+
+def test_config_rejects_invalid_provider_ids() -> None:
+    invalid_type = copy.deepcopy(DEFAULT_CONFIG)
+    invalid_type["providers"]["llm_provider_id"] = 123
+    with pytest.raises(ConfigValidationError, match="llm_provider_id"):
+        ConfigService(invalid_type)
+
+    too_long = copy.deepcopy(DEFAULT_CONFIG)
+    too_long["providers"]["image_provider_id"] = "x" * 257
+    with pytest.raises(ConfigValidationError, match="image_provider_id"):
+        ConfigService(too_long)
+
+    invalid_compressor = copy.deepcopy(DEFAULT_CONFIG)
+    invalid_compressor["providers"]["context_provider_id"] = 123
+    with pytest.raises(ConfigValidationError, match="context_provider_id"):
+        ConfigService(invalid_compressor)

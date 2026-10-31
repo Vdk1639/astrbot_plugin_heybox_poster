@@ -1,14 +1,12 @@
 """AstrBot 小黑盒发帖插件。
 
-提供发帖、搜话题、查登录态和查帖子四个 LLM 工具，另带手动指令。
+提供统一账号、发帖评论、审核面板与原生 AstrBot 社区事件接入。
 签名、表单编码、风控错误处理都在 ``core`` 里，这里只做 AstrBot 适配。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -25,7 +23,11 @@ from .core.client import (
     XhhError,
 )
 from .core.outbox import Outbox
-from .core.post import account_key, build_post_form
+from .core.migration import migrate_settings, migrate_credentials
+from .core.publishing import PublishingService
+from .community import CommunityAgent
+from .xiaoheihe.runtime import RuntimeServices, bind_runtime, unbind_runtime
+from astrbot.api.provider import LLMResponse, ProviderRequest
 
 PLUGIN_NAME = "astrbot_plugin_heybox_poster"
 PLUGIN_VERSION = Path(__file__).with_name("VERSION").read_text(encoding="ascii").strip()
@@ -34,7 +36,7 @@ PLUGIN_VERSION = Path(__file__).with_name("VERSION").read_text(encoding="ascii")
 @register(
     PLUGIN_NAME,
     "Vdk1639",
-    "小黑盒发帖：LLM 工具 + 手动指令，支持动态/长文/草稿",
+    "小黑盒社区：多账号登录、发帖评论、轮询与统一审核",
     PLUGIN_VERSION,
 )
 class XhhPosterPlugin(Star):
@@ -42,29 +44,28 @@ class XhhPosterPlugin(Star):
         super().__init__(context)
         self.config = config
         self._client: XhhClient | None = None
+        self._clients: dict[str, XhhClient] = {}
         self._last_post_at: dict[str, float] = {}
         self._outbox: Outbox | None = None
         self._locks: dict[str, asyncio.Lock] = {}
+        data_dir = self._default_outbox_path().parent
+        migrate_settings(config, data_dir)
+        self.runtime = RuntimeServices(config, data_dir)
+        warning = migrate_credentials(config, self.runtime.credentials, data_dir)
+        if warning:
+            self.runtime._alerts["migration"] = {"key": "migration", "level": "warning", "message": warning}
+        bind_runtime(self.runtime)
+        self.publisher = PublishingService(self.runtime, lambda profile: self._get_client(profile), self._get_outbox)
+        self.runtime.publisher = self.publisher
+        self.community = CommunityAgent(context, self.runtime)
         self.web = None
         if callable(getattr(context, "register_web_api", None)):
-            try:
-                from .core.web import AccountWebUI
-            except ModuleNotFoundError as exc:
-                if exc.name != "astrbot.api.web":
-                    raise
-                logger.warning(f"[{PLUGIN_NAME}] 当前 AstrBot 不支持插件账号页面，请升级")
-            else:
-                self.web = AccountWebUI(self)
-                self.web.register(context)
+            from .core.dashboard import Dashboard
+            self.web = Dashboard(self.runtime, self.community._provider_options)
+            self.web.register(context)
 
-    # ------------------------------------------------------------------
-    # 配置 / 客户端
-    # ------------------------------------------------------------------
     def _c(self, key: str, default: Any = None) -> Any:
-        try:
-            value = self.config.get(key, default)
-        except Exception:
-            value = default
+        value = self.config.get("publishing", {}).get(key, default)
         return default if value is None else value
 
     def _view_limit(self) -> int:
@@ -75,40 +76,32 @@ class XhhPosterPlugin(Star):
             value = 2
         return value if value in (1, 2, 3) else 2
 
-    def _cookie(self) -> str:
-        """优先用完整 cookie；否则用 pkey / tokenid 拼。"""
-        raw = str(self._c("cookie", "") or "").strip()
-        if raw:
-            return raw
-        parts = []
-        pkey = str(self._c("user_pkey", "") or "").strip()
-        token = str(self._c("x_xhh_tokenid", "") or "").strip()
-        if pkey:
-            parts.append("user_pkey=" + pkey)
-        if token:
-            parts.append("x_xhh_tokenid=" + token)
-        return "; ".join(parts)
+    def _cookie(self, profile_id: str = "") -> str:
+        profile_id = self.publisher.profile_id(profile_id)
+        credentials = self.runtime.credentials.load(profile_id)
+        return "; ".join(f"{key}={value}" for key, value in credentials.cookies.items()) if credentials else ""
 
-    def _get_client(self) -> XhhClient:
-        cookie = self._cookie()
-        heybox_id = str(self._c("heybox_id", "") or "").strip()
+    def _get_client(self, profile_id: str = "") -> XhhClient:
+        profile_id = self.publisher.profile_id(profile_id)
+        credentials = self.publisher.credentials(profile_id)
+        cookie = self._cookie(profile_id)
         if not cookie:
-            raise XhhError("还没有配置 cookie：请在插件配置里填 cookie（或 user_pkey + x_xhh_tokenid）")
-        if (self._client is None or cookie != self._client.cookie
-                or heybox_id != self._client.heybox_id):
-            if self._client is not None:
-                # 旧客户端交给事件循环回收，这里不阻塞
+            raise XhhError("该档案缺少网页 Cookie，发帖请在统一账号面板重新扫码")
+        client = self._clients.get(profile_id)
+        if (client is None or cookie != client.cookie
+                or credentials.uid != client.heybox_id):
+            if client is not None:
                 try:
-                    asyncio.create_task(self._client.close())
+                    asyncio.create_task(client.close())
                 except Exception:
                     pass
-            self._client = XhhClient(
-                cookie,
-                heybox_id=heybox_id,
-                timeout=float(self._c("request_timeout", 20) or 20),
-                outbox=self._get_outbox(),
+            client = XhhClient(
+                cookie, heybox_id=credentials.uid,
+                timeout=float(self._c("request_timeout", 20)), outbox=self._get_outbox(),
             )
-        return self._client
+            self._clients[profile_id] = client
+        self._client = client
+        return client
 
     def _get_outbox(self) -> Outbox:
         if self._outbox is None:
@@ -129,7 +122,7 @@ class XhhPosterPlugin(Star):
                             src.replace(dst)
                         except Exception:
                             pass
-            dedup = int(self._c("outbox_dedup_seconds", 600) or 600)
+            dedup = int(self._c("outbox_dedup_seconds", 600))
             self._outbox = Outbox(str(target), dedup_seconds=dedup)
         return self._outbox
 
@@ -138,7 +131,7 @@ class XhhPosterPlugin(Star):
         try:
             from astrbot.api.star import StarTools
 
-            return Path(StarTools.get_data_dir()) / "outbox.sqlite3"
+            return Path(StarTools.get_data_dir(PLUGIN_NAME)) / "outbox.sqlite3"
         except Exception:
             pass
         try:
@@ -148,99 +141,59 @@ class XhhPosterPlugin(Star):
         except Exception:
             return Path(__file__).resolve().parent / "outbox.sqlite3"
 
-    def _save_login(self, cookie: str, status: dict) -> None:
-        from http.cookies import SimpleCookie
-
-        parsed = SimpleCookie(cookie)
-        if (not parsed.get("user_pkey") or not parsed["user_pkey"].value
-                or not parsed.get("x_xhh_tokenid") or not parsed["x_xhh_tokenid"].value
-                or not str(status.get("user_id") or "").isascii()
-                or not str(status.get("user_id") or "").isdigit()):
-            raise XhhError("登录凭据或账号 ID 无效，原登录态未替换")
-        values = {
-            "cookie": cookie, "user_pkey": parsed["user_pkey"].value,
-            "x_xhh_tokenid": parsed["x_xhh_tokenid"].value, "heybox_id": str(status["user_id"]),
-        }
-        self._save_credentials(values)
-
-    def _save_credentials(self, values: dict, *, backup: bool = True) -> None:
-        old = {key: self._c(key, "") for key in values}
-        save = getattr(self.config, "save_config", None)
-        if not callable(save):
-            raise XhhError("宿主不支持保存插件配置，原登录态未替换")
-        self._get_outbox()
-        # 提前检查客户端配置，避免凭据写入后才发现无法重建客户端。
-        float(self._c("request_timeout", 20) or 20)
-        backup_path = self._default_outbox_path().parent / "login_backup.json"
-        if backup and any(old.values()):
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", encoding="utf-8", dir=backup_path.parent, delete=False
-                ) as file:
-                    temporary = Path(file.name)
-                    json.dump(old, file, ensure_ascii=False)
-                temporary.replace(backup_path)
-            finally:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
-        self.config.update(values)
-        try:
-            save()
-        except Exception:
-            self.config.update(old)
-            try:
-                save()
-            except Exception:
-                logger.warning(f"[{PLUGIN_NAME}] 登录配置回滚失败，请检查配置文件权限")
-            raise XhhError("登录配置保存失败，内存中的原登录态已恢复") from None
-        if self._client is not None:
-            asyncio.create_task(self._client.close())
-            self._client = None
-        if self._cookie():
-            self._get_client()
-        if not backup:
-            backup_path.unlink(missing_ok=True)
-
     async def terminate(self) -> None:
-        if self.web is not None:
-            await self.web.close()
-        if self._client is not None:
-            await self._client.close()
+        await self.community.terminate()
+        try:
+            await self.runtime.close()
+        finally:
+            unbind_runtime(self.runtime)
+            self.publisher.close()
+            for client in set(self._clients.values()):
+                await client.close()
+            self._clients.clear()
             self._client = None
-        if self._outbox is not None:
-            self._outbox.close()
-            self._outbox = None
+            if self._outbox is not None:
+                self._outbox.close()
+                self._outbox = None
 
     async def initialize(self) -> None:
-        if not self._cookie():
-            logger.warning(f"[{PLUGIN_NAME}] 未配置 cookie，发帖工具不可用")
-            return
-        try:
-            status = await self._get_client().account_status()
-            if status.get("logged_in"):
-                logger.info(
-                    f"[{PLUGIN_NAME}] 登录态正常：{status.get('nickname') or '?'}"
-                    f"（{status.get('user_id') or '?'}）"
-                )
-            else:
-                logger.warning(f"[{PLUGIN_NAME}] 登录态无效：cookie 可能已过期")
-        except Exception as exc:
-            logger.warning(f"[{PLUGIN_NAME}] 登录态检查失败：{type(exc).__name__}: {exc}")
-        try:
-            claimed = await self._get_client().reconcile_outbox()
-            if claimed:
-                logger.info(f"[{PLUGIN_NAME}] outbox 对账认领 {claimed} 条 send_unknown 帖子")
-        except Exception:
-            pass
-        try:
-            days = int(self._c("outbox_purge_days", 7))
-            purged = self._get_outbox().purge(status="failed", older_than_days=days) if days > 0 else 0
-            if purged:
-                logger.info(f"[{PLUGIN_NAME}] 清理 {purged} 条过期 failed 记录")
-        except Exception:
-            pass
+        await self.runtime.ensure_started()
+        await self.community.initialize()
+        days = int(self._c("outbox_purge_days", 7))
+        if days > 0:
+            self._get_outbox().purge(status="failed", older_than_days=days)
+
+    @filter.on_waiting_llm_request(priority=1000)
+    async def prepare_xiaoheihe_before_agent(self, event: AstrMessageEvent):
+        await self.community.prepare_xiaoheihe_before_agent(event)
+
+    @filter.on_llm_request()
+    async def inject_xiaoheihe_context(self, event: AstrMessageEvent, req: ProviderRequest):
+        await self.community.inject_xiaoheihe_context(event, req)
+
+    @filter.on_using_llm_tool(priority=-1000)
+    async def isolate_xiaoheihe_images_for_grok(self, event: AstrMessageEvent, tool: object, tool_args: dict | None):
+        await self.community.isolate_xiaoheihe_images_for_grok(event, tool, tool_args)
+
+    @filter.on_llm_tool_respond(priority=1000)
+    async def restore_xiaoheihe_images_after_grok(self, event: AstrMessageEvent, tool: object, tool_args: dict | None, tool_result: object | None):
+        await self.community.restore_xiaoheihe_images_after_grok(event, tool, tool_args, tool_result)
+
+    @filter.on_agent_done(priority=1000)
+    async def restore_xiaoheihe_images_on_agent_done(self, event: AstrMessageEvent, run_context: object, response: LLMResponse):
+        await self.community.restore_xiaoheihe_images_on_agent_done(event, run_context, response)
+
+    @filter.on_llm_response(priority=-1000)
+    async def capture_xiaoheihe_complete_reply(self, event: AstrMessageEvent, response: LLMResponse):
+        await self.community.capture_xiaoheihe_complete_reply(event, response)
+
+    @filter.on_agent_begin(priority=1000)
+    async def mark_xiaoheihe_agent_started(self, event: AstrMessageEvent, run_context: object):
+        await self.community.mark_xiaoheihe_agent_started(event, run_context)
+
+    @filter.on_agent_done(priority=-1000)
+    async def mark_xiaoheihe_agent_done(self, event: AstrMessageEvent, run_context: object, response: LLMResponse):
+        await self.community.mark_xiaoheihe_agent_done(event, run_context, response)
 
     # ------------------------------------------------------------------
     # 权限 / 频控
@@ -321,7 +274,7 @@ class XhhPosterPlugin(Star):
             return sender
         platform = {
             "aiocqhttp": "qq", "qq_official": "qq",
-            "heybox": "xhh", "xiaoheihe": "xhh",
+            "heybox": "xhh", "xiaoheihe": "xhh", "heybox_community": "xhh",
         }.get(platform, platform)
         return f"{platform}:{sender}"
 
@@ -331,28 +284,6 @@ class XhhPosterPlugin(Star):
             lock = asyncio.Lock()
             self._locks[sender] = lock
         return lock
-
-    def _rate_limit_seconds(self) -> int:
-        return max(0, int(self._c("rate_limit_cooldown_seconds", 600)))
-
-    def _rate_limit_key(self, sender: str, account: str = "") -> str:
-        account = account or account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
-        return f"{account}:{sender}"
-
-    def _record_rate_limit(self, sender: str, account: str = "") -> None:
-        seconds = self._rate_limit_seconds()
-        if seconds:
-            self._get_outbox().set_cooldown(self._rate_limit_key(sender, account), time.time() + seconds)
-
-    def _rate_limit_block(self, sender: str) -> str:
-        """命中限流后的本地冷却；返回空串表示不在冷却期。"""
-        if not self._rate_limit_seconds():
-            return ""
-        until = self._get_outbox().cooldown_until(self._rate_limit_key(sender))
-        if time.time() < until:
-            wait = int(until - time.time()) + 1
-            return f"刚触发限流，请 {wait} 秒后再试。"
-        return ""
 
     def _friendly_error(self, exc: Exception) -> str:
         """按业务类型给出对用户友好的中文提示。"""
@@ -364,11 +295,11 @@ class XhhPosterPlugin(Star):
             return f"发送结果未知（网络或服务端响应异常）：{exc}。请先核实结果，勿重复发送。"
         if isinstance(exc, XhhError):
             if exc.status in {"login", "relogin", "expired"}:
-                return "登录态失效，请重新配置 cookie。"
+                return "登录态失效，请在统一账号面板重新扫码。"
             return str(exc)
         if isinstance(exc, ValueError):
             return f"参数错误：{exc}"
-        return f"发帖失败：{type(exc).__name__}: {exc}"
+        return f"操作失败（{type(exc).__name__}），请查看管理面板状态。"
 
     def _log_error(self, exc: Exception) -> None:
         """记录错误类型与接口，不输出可能含凭据的服务端响应。"""
@@ -396,7 +327,7 @@ class XhhPosterPlugin(Star):
             yield event.plain_result("仅 AstrBot 管理员可以管理登录账号。")
             return
         yield event.plain_result(
-            "请登录 AstrBot WebUI → 插件 → 小黑盒发帖 → 可视化视图 → 账号管理，扫码登录或切换账号。"
+            "请登录 AstrBot WebUI → 插件 → 小黑盒社区 → 可视化视图 → 扫码登录，扫码登录或切换账号。"
         )
 
     @filter.command("xhh状态")
@@ -413,7 +344,7 @@ class XhhPosterPlugin(Star):
                 f"（heybox_id={status.get('user_id') or '?'}）"
             )
         else:
-            yield event.plain_result("未登录或 cookie 已失效，请重新配置 cookie（需含 user_pkey 与 x_xhh_tokenid）")
+            yield event.plain_result("未登录或登录态已失效，请在统一账号面板扫码")
 
     @filter.command("xhh发帖")
     async def cmd_post(self, event: AstrMessageEvent):
@@ -457,16 +388,16 @@ class XhhPosterPlugin(Star):
             yield event.plain_result("你没有删除权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。")
             return
         link_id = self._command_args(event, "xhh删除")
-        if not link_id:
+        if not link_id.isascii() or not link_id.isdigit():
             yield event.plain_result("用法：/xhh删除 <link_id>")
             return
-        if self._c("dry_run", True):
+        if self.publisher.dry_run(self.publisher.profile_id()):
             yield event.plain_result(f"[dry-run] 未真正删除，link_id={link_id}")
             return
         try:
             result = await self._get_client().delete_link(link_id)
             yield event.plain_result(
-                f"已删除 link_id={link_id}，result={result}"
+                f"已删除 link_id={link_id}"
             )
         except Exception as exc:
             yield event.plain_result(self._friendly_error(exc))
@@ -541,6 +472,7 @@ class XhhPosterPlugin(Star):
         topic_ids: str = "",
         mode: str = "dynamic",
         draft: bool = False,
+        profile_id: str = "",
     ) -> str:
         """发布一条小黑盒帖子（默认发动态；也可发长文或存草稿）。
 
@@ -553,67 +485,113 @@ class XhhPosterPlugin(Star):
             topic_ids(string): 已知的话题 ID，多个用英文逗号分隔；与 topic 二选一即可
             mode(string): dynamic（动态，默认）或 article（长文）
             draft(boolean): 为 true 时只存草稿，不公开发布
+            profile_id(string): 账号档案 ID，留空使用发布设置中的默认账号
         """
         if not self._is_allowed(event):
             return "当前用户没有发帖权限。请配置 AstrBot 管理员或插件 allowed_users 白名单。"
         return await self._publish(
-            event, title, text, topic=topic, topic_ids=topic_ids, mode=mode, draft=draft
+            event, title, text, topic=topic, topic_ids=topic_ids, mode=mode, draft=draft, profile_id=profile_id
         )
+
+    @filter.command("xhh评论")
+    async def cmd_comment(self, event: AstrMessageEvent):
+        """手动评论：/xhh评论 帖子ID|正文|父评论ID（可省略）"""
+        parts = self._command_args(event, "xhh评论").split("|", 2)
+        if len(parts) < 2:
+            yield event.plain_result("用法：/xhh评论 帖子ID|正文|父评论ID（可省略）")
+            return
+        yield event.plain_result(await self.tool_comment(
+            event, parts[0].strip(), parts[1].strip(),
+            parent_comment_id=parts[2].strip() if len(parts) > 2 else "",
+        ))
+
+    @filter.llm_tool(name="xhh_publish_comment")
+    async def tool_comment(self, event: AstrMessageEvent, post_id: str, text: str,
+                           parent_comment_id: str = "", root_comment_id: str = "",
+                           profile_id: str = "") -> str:
+        """提交评论，经统一审核后发送。
+
+        Args:
+            post_id(string): 帖子 ID
+            text(string): 评论正文
+            parent_comment_id(string): 回复的父评论 ID，留空评论主帖
+            root_comment_id(string): 根评论 ID，留空由服务端确定
+            profile_id(string): 账号档案 ID，留空使用默认发布账号
+        """
+        if not self._is_allowed(event):
+            return "当前用户没有评论权限。"
+        try:
+            profile_id = self.publisher.profile_id(profile_id)
+            account_id = ""
+            try:
+                account_id = self.publisher.credentials(profile_id).uid
+            except ValueError:
+                if not self.publisher.dry_run(profile_id):
+                    raise
+            result = await self.publisher.submit("comment", profile_id, dict(
+                post_id=post_id, text=text, parent_comment_id=parent_comment_id,
+                root_comment_id=root_comment_id), source=self._sender(event),
+                expected_account_id=account_id)
+            return self._publish_result(result)
+        except Exception as exc:
+            self._log_error(exc)
+            return self._friendly_error(exc)
 
     async def _publish(
         self, event: AstrMessageEvent, title: str, text: str, *,
         topic: str = "", topic_ids: str = "", mode: str = "dynamic", draft: bool = False,
+        profile_id: str = "",
     ) -> str:
-        """指令与 LLM 工具共用发布流程；入口各自检查权限。"""
+        """指令、工具和面板共用审核服务，权限在此再次校验。"""
+        if not self._is_allowed(event):
+            return "当前用户没有发帖权限。"
+        try:
+            profile_id = self.publisher.profile_id(profile_id)
+            account_id = ""
+            try:
+                account_id = self.publisher.credentials(profile_id).uid
+            except ValueError:
+                if not self.publisher.dry_run(profile_id):
+                    raise
+        except Exception as exc:
+            return self._friendly_error(exc)
         sender = self._sender(event)
         async with self._lock_for(sender):
-            block = self._rate_limit_block(sender)
-            if block:
-                return block
             wait = self._check_cooldown(event)
             if wait:
                 return wait
-            rate_account = account_key(self._cookie(), str(self._c("heybox_id", "") or "").strip())
-            dry_run = bool(self._c("dry_run", True))
             try:
-                client = None if dry_run else self._get_client()
-                ids = await self._resolve_topics(topic, topic_ids)
-                view_limit = self._view_limit()
-                if dry_run:
-                    form = build_post_form(
-                        title,
-                        text,
-                        mode=mode,
-                        topic_ids=ids,
-                        draft=draft,
-                        view_limit=view_limit,
-                    )
-                    return f"[dry-run] 未真正提交，表单如下：{form}"
-                result = await client.publish(
-                    title,
-                    text,
-                    mode=mode,
-                    topic_ids=ids,
-                    draft=draft,
-                    view_limit=view_limit,
-                )
+                ids = await self._resolve_topics(topic, topic_ids, profile_id=profile_id)
+                if account_id and self.publisher.credentials(profile_id).uid != account_id:
+                    return "账号已切换，原内容未提交，请重新发起。"
+                result = await self.publisher.submit("post", profile_id, dict(
+                    title=title, text=text, topic_ids=ids, mode=mode, draft=draft,
+                    view_limit=self._view_limit()), source=sender,
+                    expected_account_id=account_id)
+                return self._publish_result(result)
             except Exception as exc:
-                if isinstance(exc, RateLimited):
-                    self._record_rate_limit(sender, rate_account)
                 self._log_error(exc)
                 return self._friendly_error(exc)
 
-        if result.get("duplicate"):
-            return (
-                f"相同内容已在去重窗口内发送过，link_id={result.get('link_id') or '（未知）'}。"
-            )
-        link_id = result.get("link_id") or "（服务端未返回）"
-        if draft:
-            return f"草稿已保存，link_id={link_id}。"
-        return f"发布成功，link_id={link_id}。"
+    @staticmethod
+    def _publish_result(result: dict) -> str:
+        status = result["status"]
+        if status == "pending":
+            return f"已提交审核（#{result['review']['id']}），请在管理面板确认内容和账号后批准。"
+        if status == "dry_run":
+            return "[dry-run] 已预览，未实际发送；审核项保留待处理。"
+        if status == "sent":
+            sent = result.get("result") or {}
+            if sent.get("duplicate"):
+                return f"相同内容已在去重窗口内发送过，link_id={sent.get('link_id', '')}。"
+            label = "草稿已保存" if sent.get("is_draft") else "发布成功"
+            return f"{label}，ID={sent.get('link_id') or sent.get('external_comment_id') or '未知'}。"
+        if status in {"sending", "send_unknown"}:
+            return "发送结果未知或正在发送，请在面板核实，勿重复提交。"
+        return result.get("error") or f"该内容已处理，状态：{status}。"
 
     # ------------------------------------------------------------------
-    async def _resolve_topics(self, topic: str = "", raw_ids: str = "") -> list[str]:
+    async def _resolve_topics(self, topic: str = "", raw_ids: str = "", *, profile_id: str = "") -> list[str]:
         """话题解析优先级：显式 ID > 名称搜索 > 配置默认值。"""
         ids = self._normalize_ids(str(raw_ids or ""))
         if ids:
@@ -623,7 +601,7 @@ class XhhPosterPlugin(Star):
         if keyword:
             if keyword.isdigit():
                 return [keyword]
-            found = await self._get_client().search_topics(keyword)
+            found = await self._get_client(profile_id).search_topics(keyword)
             if not found:
                 raise XhhError(f"没有找到话题「{keyword}」，请先用 xhh_search_topics 确认")
             return [found[0]["topic_id"]]

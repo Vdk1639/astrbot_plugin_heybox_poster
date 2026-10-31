@@ -1,0 +1,379 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+
+from xiaoheihe.models import EventState, Notification, NotificationType, RoutingTarget
+
+
+def make_notification(identifier="one", uid="user", post="post") -> Notification:
+    return Notification(
+        profile_id="default",
+        external_event_id=f"event-{identifier}",
+        external_comment_id=f"comment-{identifier}",
+        notification_id=f"notice-{identifier}",
+        event_type=NotificationType.MENTION,
+        sender_uid=uid,
+        sender_nickname="User",
+        post_id=post,
+        root_comment_id="root",
+        parent_comment_id="root",
+        content=f"content {identifier}",
+        created_at=time.time(),
+    )
+
+
+async def test_outgoing_confirmation_self_loop_and_recent_match(repository) -> None:
+    event_id = await repository.claim_event(make_notification())
+    route = RoutingTarget("default", "post", "root", "root")
+    outgoing_id = await repository.record_outgoing_attempt(
+        "default", event_id, route, "reply", "sending"
+    )
+    match = await repository.recent_outgoing_match(
+        "default", route, "reply", since=time.time() - 10
+    )
+    assert match["id"] == outgoing_id
+    await repository.confirm_outgoing(outgoing_id, "self-comment")
+    assert await repository.is_self_comment("default", "self-comment")
+    row = await repository.db.fetchone(
+        "SELECT status, external_comment_id FROM outgoing_replies WHERE id = ?",
+        (outgoing_id,),
+    )
+    assert row["status"] == "sent"
+    assert row["external_comment_id"] == "self-comment"
+
+
+async def test_claim_event_persists_missing_uid_content_and_local_identity(repository) -> None:
+    notification = make_notification("anonymous", uid="")
+    event_id = await repository.claim_event(notification)
+    assert event_id is not None
+
+    row = await repository.db.fetchone(
+        "SELECT sender_uid, content, raw_json FROM incoming_events WHERE id = ?",
+        (event_id,),
+    )
+    raw = json.loads(row["raw_json"])
+    assert row["sender_uid"] == ""
+    assert row["content"] == "content anonymous"
+    assert raw["_adapter_identity"] == {
+        "sender_uid_verified": False,
+        "sender_identity_key": "event:default:comment-anonymous",
+    }
+
+
+async def test_confirmed_send_without_returned_comment_id_does_not_store_blank_self_id(
+    repository,
+) -> None:
+    route = RoutingTarget("default", "post", "root", "parent")
+    outgoing_id = await repository.record_outgoing_attempt(
+        "default",
+        None,
+        route,
+        "sent without response id",
+        "sending",
+    )
+    await repository.confirm_outgoing(outgoing_id, "")
+    row = await repository.db.fetchone(
+        "SELECT status, external_comment_id FROM outgoing_replies WHERE id = ?",
+        (outgoing_id,),
+    )
+    self_row = await repository.db.fetchone(
+        "SELECT 1 FROM self_comment_ids WHERE profile_id = ? AND external_comment_id = ''",
+        ("default",),
+    )
+    assert row["status"] == "sent"
+    assert row["external_comment_id"] == ""
+    assert self_row is None
+
+
+async def test_visual_context_survives_send_binding_and_expires_after_24_hours(
+    repository,
+) -> None:
+    now = time.time()
+    event_id = await repository.claim_event(make_notification("visual", post="post-visual"))
+    record = await repository.cache_visual_context(
+        profile_id="default",
+        post_id="post-visual",
+        source="original_post",
+        image_fingerprint="fingerprint-1",
+        image_hosts=["cdn.example.test"],
+        image_count=1,
+        caption="图中是价格调整公告，包含 8 月 8 日和 20 美元。",
+        provider_id="vision-fixed",
+        model="vision-model",
+        ttl_seconds=86400,
+        owner_uid="author-visual",
+        owner_nickname="视觉楼主",
+        owner_role="post_author",
+        now=now,
+    )
+    reused = await repository.cache_visual_context(
+        profile_id="default",
+        post_id="post-visual",
+        source="original_post",
+        image_fingerprint="fingerprint-1",
+        image_hosts=["cdn.example.test"],
+        image_count=1,
+        caption="图中是价格调整公告，包含 8 月 8 日和 20 美元。",
+        provider_id="other",
+        model="other",
+        ttl_seconds=86400,
+        owner_uid="author-visual",
+        owner_nickname="视觉楼主",
+        owner_role="post_author",
+        now=now + 1,
+    )
+    assert reused["id"] == record["id"]
+    assert reused["caption"] == record["caption"]
+    assert reused["owner_uid"] == "author-visual"
+    assert reused["owner_nickname"] == "视觉楼主"
+    assert reused["owner_role"] == "post_author"
+    changed_caption = await repository.cache_visual_context(
+        profile_id="default",
+        post_id="post-visual",
+        source="original_post",
+        image_fingerprint="fingerprint-1",
+        image_hosts=["cdn.example.test"],
+        image_count=1,
+        caption="同一图片的新识别结果不会覆盖旧评论已绑定的快照",
+        provider_id="other",
+        model="other",
+        ttl_seconds=86400,
+        owner_uid="author-visual",
+        owner_nickname="视觉楼主",
+        owner_role="post_author",
+        now=now + 1,
+    )
+    assert changed_caption["id"] != record["id"]
+
+    await repository.link_visual_context_to_event(event_id, record["id"], now=now + 2)
+    route = RoutingTarget("default", "post-visual", "", "")
+    outgoing_id = await repository.record_outgoing_attempt(
+        "default",
+        event_id,
+        route,
+        "主动评论",
+        "sending",
+    )
+    await repository.confirm_outgoing(outgoing_id, "bot-comment-visual")
+
+    restored = await repository.visual_context_for_comment(
+        "default",
+        ["unrelated", "bot-comment-visual"],
+        now=now + 3600,
+    )
+    assert restored is not None
+    assert restored["id"] == record["id"]
+    assert restored["bound_comment_id"] == "bot-comment-visual"
+    assert (
+        await repository.visual_context_for_comment(
+            "default",
+            ["bot-comment-visual"],
+            now=now + 86401,
+        )
+        is None
+    )
+
+
+async def test_visual_binding_failure_cannot_roll_back_confirmed_send(
+    repository,
+    monkeypatch,
+) -> None:
+    event_id = await repository.claim_event(make_notification("binding-failure"))
+    visual = await repository.cache_visual_context(
+        profile_id="default",
+        post_id="post",
+        source="original_post",
+        image_fingerprint="binding-failure-fingerprint",
+        image_hosts=["cdn.example.test"],
+        image_count=1,
+        caption="可用视觉描述",
+        provider_id="vision",
+        model="vision-model",
+        ttl_seconds=86400,
+    )
+    await repository.link_visual_context_to_event(event_id, visual["id"])
+    outgoing_id = await repository.record_outgoing_attempt(
+        "default",
+        event_id,
+        RoutingTarget("default", "post", "root", "parent"),
+        "reply already accepted by API",
+        "sending",
+    )
+
+    async def fail_optional_binding(*args, **kwargs):
+        raise RuntimeError("simulated visual metadata failure")
+
+    monkeypatch.setattr(
+        repository,
+        "bind_visual_context_to_comment",
+        fail_optional_binding,
+    )
+    confirmation = await repository.confirm_outgoing(outgoing_id, "confirmed-comment")
+
+    row = await repository.db.fetchone(
+        "SELECT status, external_comment_id FROM outgoing_replies WHERE id = ?",
+        (outgoing_id,),
+    )
+    assert row["status"] == "sent"
+    assert row["external_comment_id"] == "confirmed-comment"
+    assert "simulated visual metadata failure" in confirmation["visual_context_error"]
+
+
+async def test_event_filters_counters_and_recovery(repository) -> None:
+    first_id = await repository.claim_event(make_notification("first", "100", "p1"))
+    second_id = await repository.claim_event(make_notification("second", "200", "p2"))
+    await repository.mark_event(first_id, EventState.SENT, reply_text="answer")
+    await repository.mark_event(second_id, EventState.RETRY_WAIT, error="retry")
+    filtered = await repository.list_events(
+        status="sent", uid="100", post_id="p1", keyword="answer"
+    )
+    assert filtered["total"] == 1
+    assert filtered["items"][0]["id"] == first_id
+    recoverable = await repository.recoverable_events()
+    assert [item["id"] for item in recoverable] == [second_id]
+    await repository.increment_counter("default", reply=2, proactive=1, error=3)
+    assert await repository.today_counters("default") == {
+        "reply_count": 2,
+        "proactive_count": 1,
+        "error_count": 3,
+    }
+    assert await repository.reserve_proactive_request("default", 2) is True
+    assert await repository.reserve_proactive_request("default", 2) is False
+    assert (await repository.today_counters("default"))["proactive_count"] == 2
+
+
+async def test_proactive_request_limit_is_reserved_atomically(repository) -> None:
+    results = await asyncio.gather(
+        *(repository.reserve_proactive_request("default", 3) for _ in range(10))
+    )
+
+    assert sum(results) == 3
+    assert (await repository.today_counters("default"))["proactive_count"] == 3
+
+
+async def test_retry_schedule_reclaims_atomically_and_dead_letters(repository) -> None:
+    notification = make_notification("scheduled")
+    event_id = await repository.claim_event(notification)
+    assert (
+        await repository.schedule_retry(event_id, "first", max_retries=1) is EventState.RETRY_WAIT
+    )
+    assert await repository.claim_retry_event(notification) is None
+    await repository.db.execute(
+        "UPDATE incoming_events SET next_retry_at = 0 WHERE id = ?", (event_id,)
+    )
+    assert await repository.claim_retry_event(notification) == event_id
+    assert (
+        await repository.schedule_retry(event_id, "second", max_retries=1) is EventState.DEAD_LETTER
+    )
+    row = await repository.db.fetchone(
+        "SELECT status, retry_count, next_retry_at FROM incoming_events WHERE id = ?",
+        (event_id,),
+    )
+    assert row["status"] == EventState.DEAD_LETTER.value
+    assert row["retry_count"] == 1
+    assert row["next_retry_at"] is None
+
+
+async def test_retry_schedule_is_idempotent_until_reclaimed(repository) -> None:
+    event_id = await repository.claim_event(make_notification("retry-once"))
+    assert event_id is not None
+    assert (
+        await repository.schedule_retry(event_id, "first", max_retries=3) is EventState.RETRY_WAIT
+    )
+    assert (
+        await repository.schedule_retry(event_id, "duplicate scheduling", max_retries=3)
+        is EventState.RETRY_WAIT
+    )
+    row = await repository.db.fetchone(
+        "SELECT retry_count, error FROM incoming_events WHERE id = ?",
+        (event_id,),
+    )
+    assert row["retry_count"] == 1
+    assert row["error"] == "first"
+
+
+async def test_notification_cursor_initializes_and_advances_atomically(repository) -> None:
+    assert await repository.notification_cursor("default", "mention") is None
+    assert await repository.initialize_notification_cursor("default", "mention", "100")
+    assert not await repository.initialize_notification_cursor("default", "mention", "99")
+    assert await repository.notification_cursor("default", "mention") == "100"
+    assert not await repository.advance_notification_cursor(
+        "default",
+        "mention",
+        "stale",
+        "101",
+    )
+    assert await repository.advance_notification_cursor(
+        "default",
+        "mention",
+        "100",
+        "101",
+    )
+    assert await repository.notification_cursor("default", "mention") == "101"
+
+
+async def test_due_retry_query_only_returns_due_rows(repository) -> None:
+    due = make_notification("due")
+    later = make_notification("later")
+    due_id = await repository.claim_event(due)
+    later_id = await repository.claim_event(later)
+    await repository.defer_event(due_id, "due", delay_seconds=60)
+    await repository.defer_event(later_id, "later", delay_seconds=60)
+    await repository.db.execute(
+        "UPDATE incoming_events SET next_retry_at = 0 WHERE id = ?",
+        (due_id,),
+    )
+
+    rows = await repository.due_retry_events(profile_id="default")
+    assert [row["id"] for row in rows] == [due_id]
+
+
+async def test_account_error_feed_and_diagnostics(repository) -> None:
+    await repository.update_account_state("default", status="success", uid="1", nickname="Bot")
+    assert (await repository.account_state("default"))["uid"] == "1"
+    await repository.add_runtime_error(
+        "response_shape", "changed", profile_id="default", details={"token": "secret"}
+    )
+    candidate_id = await repository.create_feed_candidate(
+        "default", "post", "Title", "author", "generated", "reason"
+    )
+    assert (
+        await repository.create_feed_candidate(
+            "default", "post", "Title", "author", "generated", "reason"
+        )
+        is None
+    )
+    assert (await repository.list_feed_candidates())[0]["id"] == candidate_id
+    assert await repository.review_feed_candidate(candidate_id, "approved", "edited")
+    assert (await repository.feed_candidate(candidate_id))["edited_text"] == "edited"
+    snapshot = await repository.diagnostic_snapshot()
+    assert snapshot["schema_version"] == 10
+    assert snapshot["counts"]["feed_candidates"] == 1
+    assert snapshot["account_states"][0]["nickname"] == "Bot"
+    assert snapshot["recent_errors"][0]["category"] == "response_shape"
+
+
+async def test_missing_rows_and_invalid_filters(repository) -> None:
+    assert await repository.feed_candidate(999) is None
+    assert (
+        await repository.recent_outgoing_match(
+            "default",
+            RoutingTarget("default", "none"),
+            "none",
+            since=time.time() - 1,
+        )
+        is None
+    )
+    assert await repository.today_counters("missing") == {
+        "reply_count": 0,
+        "proactive_count": 0,
+        "error_count": 0,
+    }
+    import pytest
+
+    with pytest.raises(ValueError, match="状态"):
+        await repository.list_events(status="invalid")
+    with pytest.raises(ValueError, match="审核"):
+        await repository.review_feed_candidate(1, "invalid")
