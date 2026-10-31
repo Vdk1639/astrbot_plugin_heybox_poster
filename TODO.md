@@ -4,7 +4,7 @@
 
 ## 整合发布前
 
-- [ ] 在目标 AstrBot 版本安装单个插件，验证“小黑盒（发帖与评论）”机器人类型 `heybox_community` 的注册、启停、卸载和配置热重载。
+- [ ] 在目标 AstrBot 版本安装单个插件，验证“小黑盒冲浪板”机器人类型 `heybox_community` 的注册、启停、卸载和配置热重载。
 - [ ] 验证多档案分别扫码、登录检查、换号失败回滚和登出；机器人 `profile_id` 与档案一致，不与旧适配器重复轮询同一账号。
 - [ ] 确认升级整合版后旧顶层配置被忽略，并可通过面板重新登录和保存现行配置。
 - [ ] 通过三组离线检查：`python -m unittest discover -s tests -v`、`python -m pytest adapter_tests -q --asyncio-mode=auto`、`node tests/test_dashboard.mjs`。

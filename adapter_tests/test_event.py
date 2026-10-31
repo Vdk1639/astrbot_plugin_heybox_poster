@@ -52,7 +52,7 @@ def make_event(runtime, *, candidate=False, dry_run=True, proactive=False):
     return XiaoheiheMessageEvent(
         "hello",
         message,
-        PlatformMetadata(PLATFORM_NAME, "小黑盒（发帖与评论）", "adapter"),
+        PlatformMetadata(PLATFORM_NAME, "小黑盒冲浪板", "adapter"),
         "xhh_thread_1_2",
         runtime=runtime,
         route=RoutingTarget("default", "1", "2", "2"),

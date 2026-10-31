@@ -1,6 +1,6 @@
 # 维护指南
 
-本项目在 `dev` 整合发帖插件与小黑盒原生平台适配器。保持旧指令和工具参数兼容；现行账号管理统一使用多档案存储，升级整合版后需重新登录。版本文件仍为 v0.6.0，整合改动记入 Unreleased，不以文档更新宣称已发布。
+本项目在 `dev` 整合发帖插件与小黑盒原生平台适配器。保持旧指令和工具参数兼容；现行账号管理统一使用多档案存储，升级整合版后需重新登录。版本文件为 v0.6.0。
 
 ## 模块边界
 
@@ -21,7 +21,7 @@
 | `core/login.py`、`debug_qr.py` | 保留的独立扫码诊断客户端与工具；统一登录及管理 API 由 `xiaoheihe/auth.py` 与 `core/dashboard.py` 提供 |
 | `tests/`、`adapter_tests/` | 本项目离线回归与改编的上游测试 |
 
-插件标识和 API 前缀保持 `astrbot_plugin_heybox_poster`，原生平台类型为 `heybox_community`，显示名“小黑盒（发帖与评论）”。机器人 `profile_id` 必须匹配账号档案；默认手动发布档案由 `publishing.profile_id` 选择，面板和发布工具可以显式覆盖。不要从同一账号启动新旧两个插件的轮询器。
+插件标识和 API 前缀保持 `astrbot_plugin_heybox_poster`，原生平台类型为 `heybox_community`，显示名“小黑盒冲浪板”。机器人 `profile_id` 必须匹配账号档案；默认手动发布档案由 `publishing.profile_id` 选择，面板和发布工具可以显式覆盖。不要从同一账号启动新旧两个插件的轮询器。
 
 ## 必须保留的行为
 
@@ -57,6 +57,6 @@ git diff --check
 
 ## 版本与归属
 
-本轮仅在 `CHANGELOG.md` 的 Unreleased/dev 记录整合变化，保留 `VERSION`、元数据版本、插件名和仓库地址。正式发布按既有版本同步流程执行；不要因 `xiaoheihe` 上游代码原有版本号而误报整合发布。
+本轮在 `CHANGELOG.md` 的 dev 条目记录整合变化，保留 `VERSION`、元数据版本、插件名和仓库地址。不要因 `xiaoheihe` 上游代码原有版本号而误报整合发布。
 
 新增或搬运上游内容时同步维护 `THIRD_PARTY_NOTICES.md`，保留 `third_party/xiaoheihe-adapter.LICENSE` 原文，不把整合的原生平台、面板及测试描述为仅参考实现。

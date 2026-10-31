@@ -139,9 +139,9 @@ ADAPTER_LOGO_PATH = "../logo.png"
 
 @register_platform_adapter(
     PLATFORM_NAME,
-    "小黑盒（发帖与评论）",
+    "小黑盒冲浪板",
     default_config_tmpl=DEFAULT_PLATFORM_CONFIG,
-    adapter_display_name="小黑盒（发帖与评论）",
+    adapter_display_name="小黑盒冲浪板",
     logo_path=ADAPTER_LOGO_PATH,
     support_streaming_message=False,
 )
@@ -171,10 +171,10 @@ class XiaoheihePlatformAdapter(Platform):
     def meta(self) -> PlatformMetadata:
         return PlatformMetadata(
             name=PLATFORM_NAME,
-            description="小黑盒（发帖与评论）",
+            description="小黑盒冲浪板",
             id=str(self.config.get("id", PLATFORM_NAME)),
             default_config_tmpl={**DEFAULT_PLATFORM_CONFIG, **self.config},
-            adapter_display_name="小黑盒（发帖与评论）",
+            adapter_display_name="小黑盒冲浪板",
             logo_path=ADAPTER_LOGO_PATH,
             support_streaming_message=False,
         )

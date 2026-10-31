@@ -97,7 +97,7 @@ def test_adapter_is_registered_and_nonstreaming() -> None:
     assert REGISTERED_ADAPTERS[PLATFORM_NAME] is XiaoheihePlatformAdapter
     registration = XiaoheihePlatformAdapter._test_registration
     assert registration["name"] == PLATFORM_NAME == "heybox_community"
-    assert registration["adapter_display_name"] == "小黑盒（发帖与评论）"
+    assert registration["adapter_display_name"] == "小黑盒冲浪板"
     assert registration["default_config_tmpl"]["id"] == PLATFORM_NAME
     assert registration["support_streaming_message"] is False
     assert registration["default_config_tmpl"]["profile_id"] == "default"
