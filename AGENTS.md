@@ -26,6 +26,8 @@ node tests/test_account_page.mjs
 git diff --check
 ```
 
+发布新版本时只修改根目录 `VERSION`，再运行本地脚本 `python tools/sync_version.py`，同步 AstrBot 元数据、README、TODO 和当前更新日志标题。脚本已加入 `.gitignore`，不提交也不打包到插件。
+
 Python 测试使用 AstrBot API 桩和模拟网络，Node.js 测试使用 DOM / bridge 桩。它们不证明真实扫码、发帖或宿主集成已经通过；专项验收见 `TODO.md`。
 
 ## 必须保留的行为
