@@ -29,7 +29,7 @@
       <button data-tab="settings">设置</button>
       <button data-tab="sources">浏览来源</button>
       <button data-tab="events">事件记录</button>
-      <button data-tab="feed">历史主动评论审核</button>
+      <button data-tab="feed">主动评论候选</button>
       <button data-tab="logs">运行日志</button>
       <button data-tab="storage">存储管理</button>
     </nav>
@@ -119,7 +119,7 @@
 
       <section id="comment-reviews" class="panel">
         <div class="surface">
-          <div class="section-heading"><div><h2>评论审核</h2><p>显示最近 100 条手动、通知及主动评论的全部状态记录，仅待审核可操作。整合前遗留候选可在“历史主动评论审核”中处理。</p></div><button id="refresh-comment-reviews" class="secondary">刷新评论审核</button></div>
+          <div class="section-heading"><div><h2>评论审核</h2><p>显示最近 100 条手动、通知及主动评论的全部状态记录，仅待审核可操作。主动浏览候选可在“主动评论候选”中处理。</p></div><button id="refresh-comment-reviews" class="secondary">刷新评论审核</button></div>
           <div id="comment-review-list" class="candidate-list" aria-live="polite"></div>
         </div>
       </section>
@@ -223,8 +223,8 @@
         <div class="surface">
           <div class="section-heading">
             <div>
-              <h2>历史主动评论审核</h2>
-              <p>仅处理整合前的遗留候选；确认后绑定当前账号并转入统一“评论审核”，不会直接发送，仍需再次批准。新主动评论直接进入统一审核。</p>
+              <h2>主动评论候选</h2>
+              <p>处理主动浏览生成的评论候选；确认后绑定当前账号并转入统一“评论审核”，不会直接发送，仍需再次批准。</p>
             </div>
             <button id="reject-expired" class="danger secondary">拒绝 72 小时前候选</button>
           </div>

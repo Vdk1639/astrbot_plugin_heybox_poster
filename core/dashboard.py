@@ -82,7 +82,7 @@ class Dashboard(WebApiController):
             return error_response(str(exc), status_code=400)
 
     async def feed_approve(self, candidate_id):
-        """历史候选缺少账号绑定，先转入统一队列让管理员再次核对。"""
+        """主动浏览候选缺少发送账号绑定，先转入统一队列让管理员再次核对。"""
         if response := self._unauthorized():
             return response
         body = await request.json(default={})
@@ -91,20 +91,20 @@ class Dashboard(WebApiController):
         try:
             candidate_id = int(candidate_id)
             await self.runtime.ensure_started()
-            lock = self.runtime._feed_approval_locks.setdefault("legacy-review", asyncio.Lock())
+            lock = self.runtime._feed_approval_locks.setdefault("feed-review", asyncio.Lock())
             async with lock:
                 candidate = await self.runtime.repository.feed_candidate(candidate_id)
                 if not candidate or candidate["status"] != "pending":
-                    raise ValueError("历史候选不存在或已处理")
+                    raise ValueError("主动浏览候选不存在或已处理")
                 text = body.get("edited_text") or candidate["generated_text"]
                 result = await self.publisher.submit(
                     "comment", candidate["profile_id"],
                     dict(post_id=candidate["post_id"], text=text),
-                    source="legacy_candidate", source_id=f"candidate:{candidate_id}", force_review=True,
+                    source="proactive_candidate", source_id=f"candidate:{candidate_id}", force_review=True,
                     metadata={"event_id": candidate.get("incoming_event_id"), "proactive": True},
                 )
                 if result.get("review") is None:
-                    raise ValueError("请先为历史候选的档案登录账号")
+                    raise ValueError("请先为主动浏览候选的档案登录账号")
                 await self.runtime.repository.review_feed_candidate(candidate_id, "approved", text)
                 return json_response({"approved": True, "result": "queued", "review": result["review"]})
         except (ValueError, TypeError) as exc:

@@ -151,7 +151,7 @@ class DashboardTests(PluginTestCase):
                 self.assertNotIn("private-token", json.dumps(response))
         self.assertTrue(self.runtime.credentials.exists("default"))
 
-    async def test_status_and_configuration_never_expose_migration_credentials(self):
+    async def test_status_and_configuration_never_expose_unknown_credentials(self):
         self.runtime.config.raw.update(cookie="user_pkey=private-cookie", user_pkey="private-pkey")
         for method in (self.web.status, self.web.auth_status, self.web.publishing_status,
                        self.web.config_get, self.web.config_schema, self.web.diagnostics):
@@ -163,7 +163,7 @@ class DashboardTests(PluginTestCase):
                     self.assertNotIn(secret, encoded)
         self.assertTrue(self.runtime.credentials.exists("default"))
 
-    async def test_provider_schema_uses_host_choices_and_filters_migration_fields(self):
+    async def test_provider_schema_uses_host_choices_and_current_fields(self):
         response = await self.web.config_schema()
         self.assertEqual(response["status_code"], 200)
         schema = response["json"]
@@ -180,7 +180,7 @@ class DashboardTests(PluginTestCase):
         self.assertNotIn("topic_ids", schema["proactive_feed"]["items"])
         self.assertEqual(schema["profiles"]["type"], "template_list")
 
-    async def test_config_save_uses_same_persisted_object_and_rejects_legacy_credentials(self):
+    async def test_config_save_uses_same_persisted_object_and_rejects_unknown_fields(self):
         config = self.runtime.config.raw
         count = config.save_count
         replacement = copy.deepcopy((await self.web.config_get())["json"])
@@ -247,10 +247,10 @@ class DashboardTests(PluginTestCase):
         self.assertEqual(self.plugin.publisher.queue.get(review_id)["status"], "pending")
         client.assert_not_called()
 
-    async def test_legacy_candidate_requires_a_second_account_bound_approval(self):
+    async def test_proactive_candidate_requires_a_second_account_bound_approval(self):
         candidate = {
             "id": 7, "status": "pending", "profile_id": "default",
-            "post_id": "123", "generated_text": "旧候选正文", "incoming_event_id": None,
+            "post_id": "123", "generated_text": "候选正文", "incoming_event_id": None,
         }
         self.runtime.config.raw["publishing"]["comment_review_required"] = False
         self.runtime.config.raw["proactive_feed"]["dry_run"] = False
@@ -264,7 +264,7 @@ class DashboardTests(PluginTestCase):
             review = response["json"]["review"]
             self.assertEqual(review["status"], "pending")
             self.assertEqual(review["kind"], "comment")
-            self.assertEqual(review["source"], "legacy_candidate")
+            self.assertEqual(review["source"], "proactive_candidate")
             self.assertEqual(review["source_id"], "candidate:7")
             self.assertEqual(review["account_id"], "1")
             self.assertEqual(review["payload"]["text"], "修改后的正文")

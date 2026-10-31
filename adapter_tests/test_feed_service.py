@@ -339,7 +339,7 @@ async def test_feed_skips_self_blacklisted_and_already_replied(repository) -> No
 
 async def test_feed_source_filters_recommendation_topics_locally(repository) -> None:
     config = copy.deepcopy(DEFAULT_CONFIG)
-    config["proactive_feed"].update({"enabled": True, "source": "pc_game"})
+    config["proactive_feed"].update({"enabled": True, "fallback_sources": ["pc_game"]})
     client = FakeFeedClient()
 
     async def fetch_feed(**kwargs):

@@ -130,17 +130,6 @@ PROACTIVE_FEED_SOURCES = {
     "indie_game",
 }
 
-LEGACY_FEED_SOURCES = {
-    "follow": "all",
-    "game": "pc_game",
-    "hardware": "digital_tech",
-    "software": "digital_tech",
-    "movie": "film_tv",
-    "music": "daily",
-    "life": "daily",
-    "tech": "digital_tech",
-}
-
 RestartCallback = Callable[[set[str]], Awaitable[None]]
 
 
@@ -154,7 +143,7 @@ class ConfigService:
         self._lock = asyncio.Lock()
         self._callbacks: list[RestartCallback] = []
         source = copy.deepcopy(dict(config))
-        self._normalize_legacy(source)
+        self._normalize_source_selection(source)
         merged = self._merge_defaults(source, DEFAULT_CONFIG)
         self.validate(merged)
         self._replace_in_place(merged)
@@ -164,7 +153,6 @@ class ConfigService:
         return self._config
 
     def snapshot(self) -> dict[str, Any]:
-        # 旧配置中的凭据仅用于本地迁移，不能进入面板或诊断。
         return {key: copy.deepcopy(self._config[key]) for key in DEFAULT_CONFIG}
 
     def defaults(self) -> dict[str, Any]:
@@ -180,7 +168,7 @@ class ConfigService:
             raise ConfigValidationError("配置界面定义根节点必须是对象")
         proactive_items = schema.get("proactive_feed", {}).get("items", {})
         if isinstance(proactive_items, dict):
-            for field in ("source", "topic_ids", "fallback_sources"):
+            for field in ("topic_ids", "fallback_sources"):
                 proactive_items.pop(field, None)
         return {key: value for key, value in schema.items() if key in DEFAULT_CONFIG}
 
@@ -203,7 +191,7 @@ class ConfigService:
 
     async def save(self, replacement: dict[str, Any]) -> set[str]:
         source = copy.deepcopy(replacement)
-        self._normalize_legacy(source)
+        self._normalize_source_selection(source)
         candidate = self._merge_defaults(source, DEFAULT_CONFIG)
         self.validate(candidate)
         async with self._lock:
@@ -385,42 +373,22 @@ class ConfigService:
         _bounded_int(logging, "max_memory_entries", 100, 10000)
 
     def _replace_in_place(self, value: dict[str, Any]) -> None:
-        # 保留尚未成功迁移的旧配置，避免配置规范化丢失账号。
         self._config.update(copy.deepcopy(value))
 
     @staticmethod
-    def _normalize_legacy(config: dict[str, Any]) -> None:
+    def _normalize_source_selection(config: dict[str, Any]) -> None:
         proactive = config.get("proactive_feed")
         if not isinstance(proactive, dict):
             return
-
-        legacy_present = "source" in proactive
-        legacy_source = LEGACY_FEED_SOURCES.get(
-            str(proactive.get("source", "all")),
-            str(proactive.get("source", "all")),
-        )
         fallback_sources = proactive.get("fallback_sources")
-
-        # AstrBot may populate a newly introduced schema field with its default before
-        # this plugin sees the old configuration. Treat the schema default ["all"] as
-        # migration-neutral when a non-default legacy source is still present.
-        if legacy_present and (
-            "fallback_sources" not in proactive
-            or not isinstance(fallback_sources, list)
-            or not fallback_sources
-            or (fallback_sources == ["all"] and legacy_source != "all")
-        ):
-            proactive["fallback_sources"] = [legacy_source]
-            fallback_sources = proactive["fallback_sources"]
-
-        if isinstance(fallback_sources, list):
-            normalized: list[str] = []
-            for value in fallback_sources:
-                source = LEGACY_FEED_SOURCES.get(str(value), str(value))
-                if source not in normalized:
-                    normalized.append(source)
-            proactive["fallback_sources"] = ["all"] if "all" in normalized else normalized
-        proactive.pop("source", None)
+        if not isinstance(fallback_sources, list):
+            return
+        normalized: list[str] = []
+        for value in fallback_sources:
+            source = str(value)
+            if source not in normalized:
+                normalized.append(source)
+        proactive["fallback_sources"] = ["all"] if "all" in normalized else normalized
 
     @classmethod
     def _merge_defaults(cls, value: Any, defaults: Any) -> Any:

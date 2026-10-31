@@ -25,19 +25,6 @@ class FakeClient:
         return [{"topic_id": "43", "name": "Steam"}] if keyword == "Steam" else []
 
 class PluginSmokeTests(PluginTestCase):
-    def test_legacy_login_migrates_to_canonical_credentials_during_construction(self):
-        config = FakeConfig(cookie="", user_pkey="p", x_xhh_tokenid="t", heybox_id="42")
-        plugin = self._plugin(raw_config=config)
-        credentials = plugin.runtime.credentials.load("default")
-        self.assertEqual(plugin._cookie(), "user_pkey=p; x_xhh_tokenid=t")
-        self.assertEqual(credentials.uid, "42")
-        self.assertEqual(config.saved["heybox_id"], "")
-        self.assertEqual(config.saved["user_pkey"], "")
-        self.assertGreater(config.save_count, 0)
-        self.assertTrue((plugin.runtime.data_dir / "integration_migrated.json").is_file())
-        self.assertTrue((plugin.runtime.data_dir / "legacy_login_backup.json").is_file())
-        self.assertNotIn("cookie", plugin.runtime.config.snapshot())
-
     def test_command_args_accepts_both_prefix_forms(self):
         plugin = self._plugin()
         for message in ("/xhh话题 Steam", "xhh话题 Steam", "Steam"):

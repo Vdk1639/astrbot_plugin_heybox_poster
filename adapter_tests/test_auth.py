@@ -413,22 +413,15 @@ async def test_auth_save_failure_does_not_report_success(tmp_path, repository, m
     assert (await repository.account_state("default"))["status"] == LoginState.FAILED.value
 
 
-async def test_logout_removes_default_legacy_backups_but_keeps_migration_marker(tmp_path, repository):
+async def test_logout_removes_only_the_selected_profile_backup(tmp_path, repository):
     store = CredentialStore(tmp_path)
     for profile_id in ("default", "other"):
         store.save(mock_credentials(profile_id))
         store.save_replacing(replace(mock_credentials(profile_id), uid="20002"))
-    for name in ("legacy_login_backup.json", "login_backup.json", "integration_migrated.json"):
-        (tmp_path / name).write_text('{"fixture":true}', encoding="utf-8")
     auth = AuthService(store, repository, None)
     await auth.logout("other")
-    assert (tmp_path / "legacy_login_backup.json").exists()
-    assert (tmp_path / "login_backup.json").exists()
     assert store.exists("default")
     await auth.logout("default")
-    assert not (tmp_path / "legacy_login_backup.json").exists()
-    assert not (tmp_path / "login_backup.json").exists()
-    assert (tmp_path / "integration_migrated.json").read_text(encoding="utf-8") == '{"fixture":true}'
     assert not list(store.directory.glob("*.bak"))
 
 

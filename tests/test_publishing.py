@@ -178,7 +178,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                 await self.service.submit("comment", "default", payload)
         self.assertFalse(self.service.queue.list())
 
-    async def test_config_redacts_legacy_credentials_and_rejects_unsafe_flags(self):
+    async def test_config_redacts_unknown_credentials_and_rejects_unsafe_flags(self):
         self.config["cookie"] = "legacy-secret"
         self.assertNotIn("legacy-secret", str(self.runtime.config.snapshot()))
         self.assertNotIn("cookie", self.runtime.config.ui_schema())

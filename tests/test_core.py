@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import io
 import json
 import pathlib
@@ -436,30 +435,6 @@ class ClientTests(unittest.TestCase):
             )
             result = asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
             self.assertEqual(result["duplicate"], token == "new")
-
-    def test_legacy_records_preserve_dedup_and_draft_distinction(self):
-        for draft, status in ((False, "sent"), (True, "sent"), (False, "send_unknown")):
-            with self.subTest(draft=draft, status=status):
-                outbox = self._outbox()
-                legacy = hashlib.sha1("标题\n正文".encode("utf-8")).hexdigest()
-                form = build_post_form("标题", "正文", topic_ids=["43"], draft=draft)
-                outbox.mark_pending(legacy, {"title": "标题", "form": form})
-                if status == "sent":
-                    outbox.mark_sent(legacy, "legacy")
-                else:
-                    outbox.mark_unknown(legacy)
-                client = XhhClient("user_pkey=abc", outbox=outbox)
-                client.request = mock.AsyncMock(
-                    return_value={"status": "ok", "result": {"link_id": "new"}}
-                )
-                if status == "send_unknown":
-                    with self.assertRaisesRegex(XhhError, "待对账"):
-                        asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
-                    client.request.assert_not_awaited()
-                else:
-                    result = asyncio.run(client.publish("标题", "正文", topic_ids=["43"]))
-                    self.assertEqual(result["duplicate"], not draft)
-                    self.assertEqual(result["link_id"], "new" if draft else "legacy")
 
     def test_unknown_attempt_blocks_retry_without_losing_metadata(self):
         outbox = self._outbox()

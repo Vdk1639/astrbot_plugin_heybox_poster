@@ -73,27 +73,12 @@ class Outbox:
             self._conn.close()
             self._conn = None
 
-    def mark_pending(
-        self, fingerprint: str, payload: dict[str, Any], *, legacy_fingerprint: str = ""
-    ) -> dict[str, Any]:
+    def mark_pending(self, fingerprint: str, payload: dict[str, Any]) -> dict[str, Any]:
         """原子登记；未决任务阻止重发，成功任务按去重窗口拦截。"""
         conn = self._get_conn()
         now = time.time()
         with conn:
             conn.execute("BEGIN IMMEDIATE")
-            if legacy_fingerprint:
-                legacy = conn.execute(
-                    "SELECT payload FROM outbox WHERE fingerprint=?", (legacy_fingerprint,)
-                ).fetchone()
-                if legacy:
-                    meta = json.loads(legacy[0])
-                    # 旧记录没有账号信息，按相同表单保守继承，避免升级后重发。
-                    if meta.get("form") == payload.get("form"):
-                        meta["account"] = payload["account"]
-                        conn.execute(
-                            "UPDATE OR IGNORE outbox SET fingerprint=?, payload=? WHERE fingerprint=?",
-                            (fingerprint, json.dumps(meta, ensure_ascii=False), legacy_fingerprint),
-                        )
             row = conn.execute(
                 "SELECT status, link_id, updated_at FROM outbox WHERE fingerprint=?",
                 (fingerprint,),

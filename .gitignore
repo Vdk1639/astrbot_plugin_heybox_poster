@@ -14,9 +14,6 @@ login_backup.json
 *.sqlite3*
 *.db*
 credentials/
-legacy_login_backup.json
-integration_migrated.json
-settings_migrated.json
 work/
 .test-tmp*/
 .test-results*/

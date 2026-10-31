@@ -23,7 +23,6 @@ from .core.client import (
     XhhError,
 )
 from .core.outbox import Outbox
-from .core.migration import migrate_settings, migrate_credentials
 from .core.publishing import PublishingService
 from .community import CommunityAgent
 from .xiaoheihe.runtime import RuntimeServices, bind_runtime, unbind_runtime
@@ -49,11 +48,7 @@ class XhhPosterPlugin(Star):
         self._outbox: Outbox | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         data_dir = self._default_outbox_path().parent
-        migrate_settings(config, data_dir)
         self.runtime = RuntimeServices(config, data_dir)
-        warning = migrate_credentials(config, self.runtime.credentials, data_dir)
-        if warning:
-            self.runtime._alerts["migration"] = {"key": "migration", "level": "warning", "message": warning}
         bind_runtime(self.runtime)
         self.publisher = PublishingService(self.runtime, lambda profile: self._get_client(profile), self._get_outbox)
         self.runtime.publisher = self.publisher
@@ -111,17 +106,6 @@ class XhhPosterPlugin(Star):
                 target.parent.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
-            # 旧版本把 outbox 落在插件目录，迁移到新数据目录。
-            legacy = Path(__file__).resolve().parent / "outbox.sqlite3"
-            if target != legacy and legacy.exists() and not target.exists():
-                for suffix in ("", "-wal", "-shm"):
-                    src = Path(str(legacy) + suffix)
-                    dst = Path(str(target) + suffix)
-                    if src.exists():
-                        try:
-                            src.replace(dst)
-                        except Exception:
-                            pass
             dedup = int(self._c("outbox_dedup_seconds", 600))
             self._outbox = Outbox(str(target), dedup_seconds=dedup)
         return self._outbox

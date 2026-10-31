@@ -181,7 +181,7 @@ async function test(name, work) { await work(); passed++; console.log(`ok ${pass
 await test("complete reference navigation, safe DOM and poster bridge identity", async () => {
   const p = await page();
   for (const tab of ["overview", "login", "settings", "sources", "events", "feed", "logs", "storage", "publishing", "post-reviews", "comment-reviews"]) assert(p.$(tab));
-  assert.match(html, /历史主动评论审核/); assert.match(html, /heybox_community/);
+  assert.match(html, /主动评论候选/); assert.match(html, /heybox_community/);
   for (const source of Object.values(sources)) assert.doesNotMatch(source, /innerHTML|insertAdjacentHTML|document\.write|\bfetch\s*\(|new EventSource|localStorage|sessionStorage|astrbot_plugin_xiaoheihe_adapter/);
   assert.match(sources["bridge.js"], /astrbot_plugin_heybox_poster/);
   assert.equal(p.mock.readyCalls, 1);
@@ -306,14 +306,14 @@ await test("review history uses one all-status request and labels terminal sourc
         review(query.kind, "sent", 1),
         { ...review(query.kind, "rejected", 2), source: "notification" },
         { ...review(query.kind, "failed", 3), source: "dashboard", error: "发送被拒绝 (ValueError)" },
-        { ...review(query.kind, "pending", 4), source: "legacy_candidate" },
+        { ...review(query.kind, "pending", 4), source: "proactive_candidate" },
       ] } : undefined;
   await p.app.publishing.loadReviews("comment");
   const reviewCalls = p.calls.filter((call) => call.path === "publishing/reviews");
   assert.equal(reviewCalls.length, 1); assert.deepEqual(reviewCalls[0].query, { kind: "comment" });
   const host = p.$("comment-review-list");
   assert.match(host.textContent, /已发送/); assert.match(host.textContent, /已拒绝/); assert.match(host.textContent, /发送失败.*发送被拒绝/);
-  assert.match(host.textContent, /管理面板/); assert.match(host.textContent, /通知回复/); assert.match(host.textContent, /历史主动候选/);
+  assert.match(host.textContent, /管理面板/); assert.match(host.textContent, /通知回复/); assert.match(host.textContent, /主动浏览候选/);
   assert.equal(host.querySelectorAll("button").length, 2);
 });
 
@@ -351,7 +351,7 @@ await test("logout requires confirmation and binds to the displayed profile", as
   assert.equal(p.posts().length, 1);
 });
 
-await test("legacy proactive candidates remain accessible and confirm edited text", async () => {
+await test("proactive candidates remain accessible and confirm edited text", async () => {
   const p = await page(); p.mock.get = (path, query) => path === "feed/candidates" ? { items: query.status === "pending" ? [{ id: 7, profile_id: "second", post_id: "42", generated_text: "旧候选", status: "pending" }] : [] } : undefined;
   p.mock.post = () => ({ approved: true, result: "dry_run" }); await p.tab("feed");
   const card = p.$("candidate-list").children[0]; card.querySelector("textarea").value = "审核后的评论";

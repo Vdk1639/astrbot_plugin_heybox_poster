@@ -319,9 +319,6 @@ class AuthService:
         async with self._lock(profile_id):
             self._sessions.pop(profile_id, None)
             self.store.delete(profile_id)
-            if profile_id == "default":
-                for name in ("legacy_login_backup.json", "login_backup.json"):
-                    secure_unlink(self.store.directory.parent / name)
             await self.repository.update_account_state(
                 profile_id,
                 status=LoginState.LOGGED_OUT.value,

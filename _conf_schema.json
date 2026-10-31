@@ -4,13 +4,12 @@
     "description": "发布与审核",
     "items": {
       "default_topic_ids": {
-        "description": "【旧版迁移兼容】默认社区/话题 ID，多个用英文逗号分隔；发帖时没指定话题就用它",
+        "description": "默认社区/话题 ID，多个用英文逗号分隔；发帖时没指定话题就用它",
         "type": "string",
-        "default": "",
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": ""
       },
       "view_limit": {
-        "description": "【旧版迁移兼容】帖子可见范围",
+        "description": "帖子可见范围",
         "type": "int",
         "default": 2,
         "options": [
@@ -22,56 +21,47 @@
           "公开可见",
           "粉丝可见",
           "仅自己可见"
-        ],
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        ]
       },
       "allowed_users": {
-        "description": "【旧版迁移兼容】允许发帖、评论、删除的用户；留空仅允许 AstrBot 管理员。面板使用 Dashboard 登录鉴权。",
+        "description": "允许发帖、评论、删除的用户；留空仅允许 AstrBot 管理员。面板使用 Dashboard 登录鉴权。",
         "type": "list",
-        "default": [],
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": []
       },
       "cooldown_seconds": {
-        "description": "【旧版迁移兼容】每个账号真实发布的最小间隔（秒）；指令另有发送者冷却",
+        "description": "每个账号真实发布的最小间隔（秒）；指令另有发送者冷却",
         "type": "int",
-        "default": 60,
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": 60
       },
       "dry_run": {
-        "description": "【旧版迁移兼容】全局模拟运行；开启时发帖、评论和删除均不会真正发送",
+        "description": "全局模拟运行；开启时发帖、评论和删除均不会真正发送",
         "type": "bool",
-        "default": true,
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": true
       },
       "request_timeout": {
-        "description": "【旧版迁移兼容】单次请求超时（秒）",
+        "description": "单次请求超时（秒）",
         "type": "int",
-        "default": 20,
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": 20
       },
       "outbox_path": {
-        "description": "【旧版迁移兼容】发帖 outbox 数据库路径；留空则使用 AstrBot 插件数据目录下的 outbox.sqlite3",
+        "description": "发帖 outbox 数据库路径；留空则使用 AstrBot 插件数据目录下的 outbox.sqlite3",
         "type": "string",
-        "default": "",
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": ""
       },
       "outbox_dedup_seconds": {
-        "description": "【旧版迁移兼容】同账号、同提交表单的成功发送去重窗口（秒）；正在发送或结果未知的请求持续阻止重发",
+        "description": "同账号、同提交表单的成功发送去重窗口（秒）；正在发送或结果未知的请求持续阻止重发",
         "type": "int",
-        "default": 600,
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": 600
       },
       "rate_limit_cooldown_seconds": {
-        "description": "【旧版迁移兼容】命中限流后的本地冷却时间（秒），按账号及平台发送者持久化，重启后仍生效；0 禁用",
+        "description": "命中限流后的本地冷却时间（秒），按账号及平台发送者持久化，重启后仍生效；0 禁用",
         "type": "int",
-        "default": 600,
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": 600
       },
       "outbox_purge_days": {
-        "description": "【旧版迁移兼容】启动时清理多少天前的 failed 记录；0 表示不清理",
+        "description": "启动时清理多少天前的 failed 记录；0 表示不清理",
         "type": "int",
-        "default": 7,
-        "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
+        "default": 7
       },
       "profile_id": {
         "description": "默认发布账号档案",
@@ -486,13 +476,6 @@
         "default": 10,
         "hint": "仅在合格帖子提交给 AI 前计数；浏览和本地过滤不占额度。"
       },
-      "source": {
-        "description": "旧版推荐流分类（仅迁移）",
-        "type": "string",
-        "default": "all",
-        "invisible": true,
-        "hint": "v1.2.x 兼容字段。v1.3.0 启动后迁移到 fallback_sources，不再作为当前设置入口。"
-      },
       "topic_ids": {
         "description": "真实分区 ID（由浏览来源页管理）",
         "type": "list",
@@ -503,7 +486,7 @@
         }
       },
       "fallback_sources": {
-        "description": "兼容/回退推荐流分类（由浏览来源页管理）",
+        "description": "回退推荐流分类（由浏览来源页管理）",
         "type": "list",
         "default": [
           "all"
@@ -603,75 +586,5 @@
         "default": 2000
       }
     }
-  },
-  "default_topic_ids": {
-    "description": "【旧版迁移兼容】默认社区/话题 ID，多个用英文逗号分隔；发帖时没指定话题就用它",
-    "type": "string",
-    "default": "",
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "view_limit": {
-    "description": "【旧版迁移兼容】帖子可见范围",
-    "type": "int",
-    "default": 2,
-    "options": [
-      1,
-      2,
-      3
-    ],
-    "labels": [
-      "公开可见",
-      "粉丝可见",
-      "仅自己可见"
-    ],
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "allowed_users": {
-    "description": "【旧版迁移兼容】允许发帖、评论、删除的用户；留空仅允许 AstrBot 管理员。面板使用 Dashboard 登录鉴权。",
-    "type": "list",
-    "default": [],
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "cooldown_seconds": {
-    "description": "【旧版迁移兼容】每个账号真实发布的最小间隔（秒）；指令另有发送者冷却",
-    "type": "int",
-    "default": 60,
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "dry_run": {
-    "description": "【旧版迁移兼容】全局模拟运行；开启时发帖、评论和删除均不会真正发送",
-    "type": "bool",
-    "default": true,
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "request_timeout": {
-    "description": "【旧版迁移兼容】单次请求超时（秒）",
-    "type": "int",
-    "default": 20,
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "outbox_path": {
-    "description": "【旧版迁移兼容】发帖 outbox 数据库路径；留空则使用 AstrBot 插件数据目录下的 outbox.sqlite3",
-    "type": "string",
-    "default": "",
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "outbox_dedup_seconds": {
-    "description": "【旧版迁移兼容】同账号、同提交表单的成功发送去重窗口（秒）；正在发送或结果未知的请求持续阻止重发",
-    "type": "int",
-    "default": 600,
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "rate_limit_cooldown_seconds": {
-    "description": "【旧版迁移兼容】命中限流后的本地冷却时间（秒），按账号及平台发送者持久化，重启后仍生效；0 禁用",
-    "type": "int",
-    "default": 600,
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
-  },
-  "outbox_purge_days": {
-    "description": "【旧版迁移兼容】启动时清理多少天前的 failed 记录；0 表示不清理",
-    "type": "int",
-    "default": 7,
-    "hint": "仅首次升级迁移读取，之后不再使用。请在统一管理面板修改设置或登录。"
   }
 }

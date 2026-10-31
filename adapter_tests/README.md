@@ -16,7 +16,7 @@ Windows 沙箱下 pytest 创建的私有临时目录可能不可访问，此时�
 - `test_main_contract.py` 改为 `test_community_agent.py`：加载 `community.py`，由 fixture 创建并关闭 runtime，再注入 `CommunityAgent`，保留原图预处理、身份归属、视觉缓存、Provider 回退、上下文压缩、Grok 工具隔离、Agent 生命周期和冷热启动测试。
 - 新增协作类不注册插件、不创建第二 runtime/WebUI、不关闭注入 runtime、全部 8 个 hook 忽略旧平台、两种平台注册共存、热重载失败后继续处理和内部 session/extra 字段兼容测试。
 - 原 `test_repository.py` 全部是数据库行为测试，无不适用的仓库元检查，全部保留。
-- `test_v130_release_audit.py` 保留旧浏览来源迁移和新选择覆盖旧值的行为测试。
+- `test_v130_release_audit.py` 覆盖当前浏览来源选择不会被配置规范化破坏。
 - stubs、helpers、fixtures 均保留，`tests.*` 引用改为 `adapter_tests.*`。平台注册断言使用 `PLATFORM_NAME`，Web API 路由断言使用 `PLUGIN_NAME`。
 - `test_runtime.py` 明确关闭两种发布审核，继续检验原来的发送能力；整合后的默认审核由主仓库新增测试覆盖。
 - 参考 `sanitize_reply_text` 已将评论换行合并为空格，迁移时修正其旧断言；仍验证工具内容过滤、最大长度和空回复拒绝。

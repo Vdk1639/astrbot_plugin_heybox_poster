@@ -1,17 +1,16 @@
 # 维护指南
 
-本项目在 `dev` 整合发帖插件与小黑盒原生平台适配器。保持旧指令和工具参数兼容；现行账号管理统一使用多档案存储，旧顶层配置仅作为迁移输入。版本文件仍为 v0.6.0，整合改动记入 Unreleased，不以文档更新宣称已发布。
+本项目在 `dev` 整合发帖插件与小黑盒原生平台适配器。保持旧指令和工具参数兼容；现行账号管理统一使用多档案存储，升级整合版后需重新登录。版本文件仍为 v0.6.0，整合改动记入 Unreleased，不以文档更新宣称已发布。
 
 ## 模块边界
 
 | 入口 | 职责 |
 |---|---|
-| `main.py` | 插件初始化、迁移、指令与 LLM 工具、手动操作权限、生命周期与 Agent 钩子转发 |
+| `main.py` | 插件初始化、指令与 LLM 工具、手动操作权限、生命周期与 Agent 钩子转发 |
 | `community.py` | 原生事件的模型路由、上下文、图片理解与回复聚合；改编自上游适配器入口 |
 | `core/publishing.py` | 帖子与评论共用的档案选择、UID 校验、模拟开关、审核与发送入口 |
 | `core/review.py` | `reviews.sqlite3` 持久队列、去重、原子领取和未知发送保护 |
-| `core/dashboard.py` | 继承原生管理 API，新增发布审核接口及历史候选转入统一审核 |
-| `core/migration.py` | 旧设置与凭据的一次性迁移、备份、回滚和持久标记 |
+| `core/dashboard.py` | 继承原生管理 API，新增发布审核接口及主动浏览候选转入统一审核 |
 | `core/client.py`、`core/post.py`、`core/transport.py`、`core/sign.py` | 发帖业务、表单、签名请求及错误处理；旧导入路径继续兼容 |
 | `core/outbox.py` | 原有发帖发送登记、去重、对账和持久冷却 |
 | `xiaoheihe/auth.py` | 档案凭据存储、扫码、校验、覆盖备份与登出；这是统一登录入口 |
@@ -28,15 +27,14 @@
 
 - 手动发帖、评论和删除检查 `publishing.allowed_users` / AstrBot 管理员权限；面板入口使用 Dashboard 鉴权，不能借手动白名单绕过。
 - 所有生产发布入口经过 `PublishingService`；原生通知回复和新主动候选进入同一审核队列，不能从 Agent 回调绕开审核直接调用客户端发送。
-- 历史候选的 `feed_approve` 由 `Dashboard` 覆盖：确认只将候选转入统一审核并绑定当前 UID，返回 `result: queued`，不直接发送；仍需在评论审核再次批准。
+- 主动浏览候选的 `feed_approve` 由 `Dashboard` 覆盖：确认只将候选转入统一审核并绑定当前 UID，返回 `result: queued`，不直接发送；仍需在评论审核再次批准。
 - `publishing.dry_run` 与档案 `dry_run` 做逻辑或；主动评论再叠加 `proactive_feed.dry_run`。真实发送前重新检查当前开关与凭据，不能只信任生成时的快照。
 - 默认发帖和评论都需审核。有凭据且启用审核时提交返回 `pending`；模拟批准返回 `dry_run` 时审核项可能仍为 `pending`，无凭据的模拟提交可不生成审核项。
 - 审核绑定提交时的 `profile_id` 和 `account_id`；生成期间、批准前及实际发送前不能因换号而改用另一 UID。
 - 网络异常、任务取消和不确定响应保留未知结果；进程重启将遗留 `sending` 转为 `send_unknown`。不能将未知记录自动当成失败重发。发帖 outbox 的对账不代表所有评论审核状态都能自动修复。
 - 只有 `pending` 可以批准或拒绝。审核页按类型读取最近 100 条全部状态，保留已发送、拒绝、失败等只读历史；明确失败不应提示为结果未知。页面显示账号、内容、目标和状态，未知结果不能提供重发入口；动态文本用安全 DOM，禁止插入不可信 HTML。
 - Web API（含日志 SSE）要求已认证 Dashboard 会话；审核批准、登出和存储清理要求 JSON 布尔值 `confirm: true`。这些路由不是匿名 webhook。
-- `config`、`config/defaults`、`config/schema` 只返回 `DEFAULT_CONFIG` 中的现行分组；拒绝将旧凭据或迁移字段作为可编辑配置返回。接口与日志不得输出 Cookie、二维码响应原文或凭据备份。
-- 迁移先备份、保存凭据与配置，再写 `integration_migrated.json`；保留失败回滚，不覆盖已有 `default` 凭据。登出后不能因再次启动重新导入旧凭据；不要删迁移标记充当登录修复。
+- `config`、`config/defaults`、`config/schema` 只返回 `DEFAULT_CONFIG` 中的现行分组。接口与日志不得输出 Cookie、二维码响应原文或凭据备份。
 - 扫码使用隔离会话和 `app=web`；覆盖账号前保留 `.json.bak`，失败回滚。统一面板卸载时清理轮询、SSE、动画和确认弹窗，迟到响应不能写回旧账号状态。
 - 修改共享逻辑前搜索指令、工具、运行时、页面、配置和测试调用方。移动上游代码时保留校验、错误处理和归属声明；已有服务可复用时不增加平行业务层。
 
@@ -53,9 +51,9 @@ node tests/test_dashboard.mjs
 git diff --check
 ```
 
-`adapter_tests` 使用异步 pytest fixture，显式设置 `--asyncio-mode=auto`，避免依赖上游仓库未搬入的 pytest 配置。新页面入口是 `tests/test_dashboard.mjs`；旧 `tests/test_account_page.mjs` 依赖已替换的单账号 DOM，目前保留作迁移覆盖参考，不代表现行页面测试。替换 CI 入口前确认旧测试中仍适用的轮询恢复等断言已迁移。
+`adapter_tests` 使用异步 pytest fixture，显式设置 `--asyncio-mode=auto`，避免依赖上游仓库未搬入的 pytest 配置。新页面入口是 `tests/test_dashboard.mjs`；旧 `tests/test_account_page.mjs` 依赖已替换的单账号 DOM，目前保留作参考，不代表现行页面测试。替换 CI 入口前确认仍适用的轮询恢复等断言已迁移。
 
-这些检查不证明真实扫码、发帖、评论、轮询或 AstrBot 宿主升级已通过。真实账号写操作及清除部署凭据须由用户明确授权，不在离线验证中执行。不要将凭据、迁移备份、二维码、日志或数据库提交到仓库。
+这些检查不证明真实扫码、发帖、评论、轮询或 AstrBot 宿主升级已通过。真实账号写操作及清除部署凭据须由用户明确授权，不在离线验证中执行。不要将凭据、二维码、日志或数据库提交到仓库。
 
 ## 版本与归属
 

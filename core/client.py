@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from typing import Any
@@ -128,9 +127,6 @@ class XhhClient(XhhTransport):
                     "baseline_ids": sorted(baseline_ids),
                     "posted_at": posted_at,
                 },
-                legacy_fingerprint=hashlib.sha1(
-                    f"{title.strip()}\n{content.strip()}".encode("utf-8")
-                ).hexdigest(),
             )
             if dedup.get("blocked"):
                 raise XhhError("相同请求仍在发送或结果待对账，请先核实，勿重复发送。")

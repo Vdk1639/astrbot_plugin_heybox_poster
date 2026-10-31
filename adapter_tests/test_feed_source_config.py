@@ -7,17 +7,6 @@ import pytest
 from xiaoheihe.config_service import DEFAULT_CONFIG, ConfigService, ConfigValidationError
 
 
-def test_legacy_single_source_migrates_to_fallback_sources() -> None:
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    config["proactive_feed"].pop("fallback_sources")
-    config["proactive_feed"]["source"] = "hardware"
-
-    snapshot = ConfigService(config).snapshot()
-
-    assert snapshot["proactive_feed"]["fallback_sources"] == ["digital_tech"]
-    assert "source" not in snapshot["proactive_feed"]
-
-
 def test_fallback_sources_accept_multiple_categories() -> None:
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["proactive_feed"]["fallback_sources"] = ["pc_game", "digital_tech", "anime"]
@@ -65,6 +54,6 @@ def test_fallback_sources_reject_invalid_selection(sources: list[str], message: 
         ConfigService(config)
 
 
-def test_generic_schema_hides_legacy_source_selector() -> None:
+def test_generic_schema_exposes_only_current_source_selectors() -> None:
     schema = ConfigService(copy.deepcopy(DEFAULT_CONFIG)).ui_schema()
     assert "source" not in schema["proactive_feed"]["items"]

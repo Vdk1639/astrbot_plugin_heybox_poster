@@ -64,9 +64,6 @@ class FeedService:
         feed_config = config["proactive_feed"]
         self._topic_ids = tuple(normalize_topic_ids(feed_config.get("topic_ids", [])))
         fallback_values = feed_config.get("fallback_sources", ["all"])
-        legacy_source = str(feed_config.get("source", "")).strip()
-        if legacy_source and fallback_values == ["all"]:
-            fallback_values = [legacy_source]
         self._fallback_sources = tuple(
             str(value) for value in fallback_values if str(value).strip()
         ) or ("all",)

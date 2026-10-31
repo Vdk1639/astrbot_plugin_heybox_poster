@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const labels = { pending: "待审核", sending: "发送中", sent: "已发送", dry_run: "模拟运行", rejected: "已拒绝", failed: "发送失败", send_unknown: "发送结果未知" };
 const statusText = (status) => labels[status] || status || "未知状态";
-const sourceLabels = { dashboard: "管理面板", notification: "通知回复", proactive: "主动评论", legacy_candidate: "历史主动候选" };
+const sourceLabels = { dashboard: "管理面板", notification: "通知回复", proactive: "主动评论", proactive_candidate: "主动浏览候选" };
 
 export function createPublishing({ bridge, busy, confirmAction, metric, toast, formatTime, isUnloaded }) {
   let revision = 0;
