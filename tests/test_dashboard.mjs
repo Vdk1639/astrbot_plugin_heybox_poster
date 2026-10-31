@@ -130,7 +130,7 @@ async function page(options = {}) {
     if (mock.get) { const value = await mock.get(path, query); if (value !== undefined) return value; }
     if (path === "config" || path === "config/defaults") return plain(config);
     if (path === "config/schema") return plain(schema);
-    if (path === "status") return { version: "v0.6.0", profiles: [], tasks: [], adapters: [], alerts: [] };
+    if (path === "status") return { version: "v0.7.0", profiles: [], tasks: [], adapters: [], alerts: [] };
     if (path === "publishing/status") return { profile_id: "second", has_credentials: true, uid: "uid-2", dry_run: true, post_review_required: true, comment_review_required: true, counts: { pending: 2 } };
     if (path === "auth/status") return { profile_id: query.profile_id, state: "logged_in", nickname: query.profile_id, uid: query.profile_id };
     if (path === "events") return { page: 1, page_size: 50, total: 0, items: [] };
