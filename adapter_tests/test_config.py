@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -129,3 +131,125 @@ def test_config_rejects_invalid_provider_ids() -> None:
     invalid_compressor["providers"]["context_provider_id"] = 123
     with pytest.raises(ConfigValidationError, match="context_provider_id"):
         ConfigService(invalid_compressor)
+
+
+GUARD_FIELDS = {
+    "reply": {
+        "reply_thread_once": True, "reply_daily_per_user": 5,
+        "reply_daily_total": 30, "reply_owner_exempt": True,
+    },
+    "publishing": {"comment_daily_limit": 30},
+    "risk": {
+        "enabled": True, "auto_filter_enabled": False, "watch_score": 20,
+        "auto_filter_score": 60, "flood_window_minutes": 10, "flood_threshold": 8,
+        "burst_score": 20, "repeat_score": 15, "injection_score": 25,
+        "privacy_score": 30, "owner_exempt": True,
+    },
+}
+GUARD_INTS = [
+    (group, key) for group, fields in GUARD_FIELDS.items()
+    for key, default in fields.items() if type(default) is int
+]
+GUARD_BOOLS = [
+    (group, key) for group, fields in GUARD_FIELDS.items()
+    for key, default in fields.items() if type(default) is bool
+]
+
+
+def test_guard_defaults_upgrade_legacy_config_and_match_schema(fake_config):
+    for group, fields in GUARD_FIELDS.items():
+        for key in fields:
+            fake_config[group].pop(key)
+    fake_config.pop("risk")
+    service = ConfigService(fake_config)
+    schema = service.ui_schema()
+    raw_schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8"))
+    for group, fields in GUARD_FIELDS.items():
+        for key, default in fields.items():
+            assert service.snapshot()[group][key] == default
+            assert service.defaults()[group][key] == default
+            for definition in (schema, raw_schema):
+                field = definition[group]["items"][key]
+                assert field["default"] == default
+                assert field["type"] == ("bool" if type(default) is bool else "int")
+
+
+@pytest.mark.parametrize("group,key", GUARD_INTS)
+@pytest.mark.parametrize("invalid", [None, True, False, 1.0, "5", -1, 100001])
+def test_guard_integers_are_strict(group, key, invalid):
+    candidate = copy.deepcopy(DEFAULT_CONFIG)
+    candidate[group][key] = invalid
+    with pytest.raises(ConfigValidationError, match=key):
+        ConfigService(candidate)
+
+
+@pytest.mark.parametrize("group,key", GUARD_BOOLS)
+@pytest.mark.parametrize("invalid", [None, 0, 1, "true", [], {}])
+def test_guard_booleans_are_strict(group, key, invalid):
+    candidate = copy.deepcopy(DEFAULT_CONFIG)
+    candidate[group][key] = invalid
+    with pytest.raises(ConfigValidationError, match=key):
+        ConfigService(candidate)
+
+
+@pytest.mark.parametrize("group", GUARD_FIELDS)
+@pytest.mark.parametrize("invalid", [None, [], False, ""])
+def test_guard_groups_reject_explicit_non_objects(group, invalid):
+    candidate = copy.deepcopy(DEFAULT_CONFIG)
+    candidate[group] = invalid
+    with pytest.raises(ConfigValidationError, match=group):
+        ConfigService(candidate)
+
+
+def test_guard_ranges_and_disabled_limits_match_schema():
+    service = ConfigService(copy.deepcopy(DEFAULT_CONFIG))
+    schema = service.ui_schema()
+    for group, key in GUARD_INTS:
+        field = schema[group]["items"][key]
+        for boundary in (field["min"], field["max"]):
+            candidate = copy.deepcopy(DEFAULT_CONFIG)
+            candidate[group][key] = boundary
+            if key == "watch_score":
+                candidate["risk"]["auto_filter_score"] = boundary + 1
+            elif key == "auto_filter_score":
+                candidate["risk"]["watch_score"] = boundary - 1
+            assert ConfigService(candidate).snapshot()[group][key] == boundary
+        for invalid in (field["min"] - 1, field["max"] + 1):
+            candidate = copy.deepcopy(DEFAULT_CONFIG)
+            candidate[group][key] = invalid
+            with pytest.raises(ConfigValidationError, match=key):
+                ConfigService(candidate)
+    for threshold in (20, 19):
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["risk"]["auto_filter_score"] = threshold
+        with pytest.raises(ConfigValidationError, match="必须大于"):
+            ConfigService(candidate)
+
+
+@pytest.mark.asyncio
+async def test_guard_save_rejects_invalid_values_without_mutation(fake_config):
+    service = ConfigService(fake_config)
+    seen = []
+
+    async def callback(changed):
+        seen.append(changed)
+
+    service.add_restart_callback(callback)
+    previous = service.snapshot()
+    for group, key, invalid in [("risk", "enabled", "false"), ("reply", "reply_daily_total", None),
+                                ("publishing", "comment_daily_limit", True), ("risk", "auto_filter_score", 20)]:
+        candidate = service.snapshot()
+        candidate[group][key] = invalid
+        with pytest.raises(ConfigValidationError):
+            await service.save(candidate)
+        assert service.snapshot() == previous
+        assert fake_config.save_count == 0
+        assert seen == []
+    candidate = service.snapshot()
+    candidate["risk"]["enabled"] = False
+    candidate["reply"]["reply_daily_total"] = 0
+    candidate["publishing"]["comment_daily_limit"] = 0
+    assert await service.save(candidate) == {"risk", "reply", "publishing"}
+    assert fake_config.save_count == 1
+    assert seen == [{"risk", "reply", "publishing"}]
+    assert service.snapshot() == candidate

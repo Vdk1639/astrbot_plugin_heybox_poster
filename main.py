@@ -562,6 +562,8 @@ class XhhPosterPlugin(Star):
     @staticmethod
     def _publish_result(result: dict) -> str:
         status = result["status"]
+        if result.get("policy_blocked"):
+            return f"未发送，仍待审核（#{result['review']['id']}）：{result['message']}。"
         if status == "pending":
             return f"已提交审核（#{result['review']['id']}），请在管理面板确认内容和账号后批准。"
         if status == "dry_run":

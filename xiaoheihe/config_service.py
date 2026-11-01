@@ -17,6 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cooldown_seconds": 60, "request_timeout": 20, "outbox_path": "",
         "outbox_dedup_seconds": 600, "rate_limit_cooldown_seconds": 600,
         "outbox_purge_days": 7,
+        "comment_daily_limit": 30,
     },
     "profiles": [
         {
@@ -68,6 +69,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_retries": 3,
         "only_explicit_mentions": True,
         "reply_to_direct_replies": True,
+        "reply_thread_once": True,
+        "reply_daily_per_user": 5,
+        "reply_daily_total": 30,
+        "reply_owner_exempt": True,
+    },
+    "risk": {
+        "enabled": True,
+        "auto_filter_enabled": False,
+        "watch_score": 20,
+        "auto_filter_score": 60,
+        "flood_window_minutes": 10,
+        "flood_threshold": 8,
+        "burst_score": 20,
+        "repeat_score": 15,
+        "injection_score": 25,
+        "privacy_score": 30,
+        "owner_exempt": True,
     },
     "permissions": {
         "whitelist_mode": False,
@@ -143,6 +161,7 @@ class ConfigService:
         self._lock = asyncio.Lock()
         self._callbacks: list[RestartCallback] = []
         source = copy.deepcopy(dict(config))
+        self._validate_guard_overrides(source)
         self._normalize_source_selection(source)
         merged = self._merge_defaults(source, DEFAULT_CONFIG)
         self.validate(merged)
@@ -191,6 +210,7 @@ class ConfigService:
 
     async def save(self, replacement: dict[str, Any]) -> set[str]:
         source = copy.deepcopy(replacement)
+        self._validate_guard_overrides(source)
         self._normalize_source_selection(source)
         candidate = self._merge_defaults(source, DEFAULT_CONFIG)
         self.validate(candidate)
@@ -243,6 +263,7 @@ class ConfigService:
         for key in ("cooldown_seconds", "outbox_dedup_seconds", "rate_limit_cooldown_seconds"):
             _bounded_int(publishing, key, 0, 86400)
         _bounded_int(publishing, "outbox_purge_days", 0, 3650)
+        _bounded_int(publishing, "comment_daily_limit", 0, 100000)
         if not isinstance(publishing.get("allowed_users"), (list, str)):
             raise ConfigValidationError("publishing.allowed_users 必须是列表或逗号分隔的字符串")
         for key in ("default_topic_ids", "outbox_path"):
@@ -277,6 +298,24 @@ class ConfigService:
         _bounded_int(reply, "reply_timeout_seconds", 5, 600)
         _bounded_int(reply, "provider_fallback_grace_seconds", 0, 300)
         _bounded_int(reply, "max_retries", 0, 8)
+        for key in ("reply_thread_once", "reply_owner_exempt"):
+            if not isinstance(reply.get(key), bool):
+                raise ConfigValidationError(f"reply.{key} 必须是布尔值")
+        for key in ("reply_daily_per_user", "reply_daily_total"):
+            _bounded_int(reply, key, 0, 100000)
+
+        risk = _object(config, "risk")
+        for key in ("enabled", "auto_filter_enabled", "owner_exempt"):
+            if not isinstance(risk.get(key), bool):
+                raise ConfigValidationError(f"risk.{key} 必须是布尔值")
+        _bounded_int(risk, "watch_score", 1, 999)
+        _bounded_int(risk, "auto_filter_score", 2, 1000)
+        if risk["auto_filter_score"] <= risk["watch_score"]:
+            raise ConfigValidationError("risk.auto_filter_score 必须大于 watch_score")
+        _bounded_int(risk, "flood_window_minutes", 1, 1440)
+        _bounded_int(risk, "flood_threshold", 2, 1000)
+        for key in ("burst_score", "repeat_score", "injection_score", "privacy_score"):
+            _bounded_int(risk, key, 0, 1000)
 
         network = _object(config, "network")
         _bounded_number(network, "request_timeout_seconds", 1, 300)
@@ -374,6 +413,22 @@ class ConfigService:
 
     def _replace_in_place(self, value: dict[str, Any]) -> None:
         self._config.update(copy.deepcopy(value))
+
+    @staticmethod
+    def _validate_guard_overrides(config: dict[str, Any]) -> None:
+        # Explicit null must not become a default while merging safety controls.
+        fields = {
+            "publishing": ("comment_daily_limit",),
+            "reply": ("reply_thread_once", "reply_daily_per_user", "reply_daily_total", "reply_owner_exempt"),
+            "risk": tuple(DEFAULT_CONFIG["risk"]),
+        }
+        for group, keys in fields.items():
+            if group not in config:
+                continue
+            values = _object(config, group)
+            for key in keys:
+                if key in values and type(values[key]) is not type(DEFAULT_CONFIG[group][key]):
+                    raise ConfigValidationError(f"{group}.{key} 类型无效")
 
     @staticmethod
     def _normalize_source_selection(config: dict[str, Any]) -> None:

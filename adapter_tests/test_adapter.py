@@ -84,6 +84,10 @@ class FakeRuntime:
             proactive_review_required=proactive_review_required,
         )
         self.credentials = FakeCredentials()
+        self.repository = Mock(
+            admission_account_id=AsyncMock(return_value=""),
+            db=Mock(fetchone=AsyncMock(return_value=None)),
+        )
         self.deliveries = []
 
     async def get_client(self, profile_id):
@@ -513,6 +517,11 @@ async def test_synthetic_dispatch_routes_unreviewed_mode_to_real_delivery() -> N
     )
 
     class Repository:
+        db = Mock(execute=AsyncMock())
+
+        async def admission_account_id(self, event_id):
+            return "bot-uid"
+
         async def claim_event(self, notification):
             return 7
 
@@ -523,7 +532,7 @@ async def test_synthetic_dispatch_routes_unreviewed_mode_to_real_delivery() -> N
             return None
 
     async def get_client(profile_id):
-        return object()
+        return type("Client", (), {"credentials": runtime.credentials.load(profile_id)})()
 
     runtime.repository = Repository()
     runtime.get_client = get_client

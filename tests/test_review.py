@@ -60,6 +60,17 @@ class ReviewQueueTests(unittest.TestCase):
         duplicate = self.submit({"body": {"a": [False, None, "正文"], "z": 1}, "title": "标题"})
         self.assertEqual(duplicate["id"], row["id"])
 
+    def test_late_release_cannot_revoke_a_new_claim_at_same_timestamp(self):
+        row = self.submit()
+        with mock.patch("astrbot_plugin_heybox_poster.core.review.time.time", return_value=1000):
+            first = self.claim(row)
+            self.queue.release_claim(row["id"], first["claim_token"], "未发送")
+            second = self.claim(row)
+            self.assertNotEqual(first["claim_token"], second["claim_token"])
+            with self.assertRaises(ValueError):
+                self.queue.release_claim(row["id"], first["claim_token"], "迟到的释放")
+        self.assertEqual(self.queue.get(row["id"])["status"], "sending")
+
     def test_kind_profile_account_and_content_are_isolated(self):
         rows = [
             self.submit(), self.submit(kind="comment"), self.submit(profile_id="other"),

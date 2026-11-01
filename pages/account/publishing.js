@@ -50,6 +50,11 @@ export function createPublishing({ bridge, busy, confirmAction, metric, toast, f
 
   function showResult(result, host) {
     const status = result.status || result.review?.status;
+    if (status === "pending" && result.policy_blocked === true && result.review?.status === "pending") {
+      host.textContent = `未发送，仍待审核：${result.message || result.reason || "当前策略阻止发送"}。可稍后重新审批或拒绝。`;
+      host.dataset.tone = "warning";
+      return "pending";
+    }
     const messages = {
       pending: "已加入审核队列，请前往对应的发帖审核或评论审核面板。",
       dry_run: "模拟运行完成，没有实际发送。",
@@ -122,6 +127,7 @@ export function createPublishing({ bridge, busy, confirmAction, metric, toast, f
         actions.add(key);
         approve.disabled = reject.disabled = true;
         let attempted = false;
+        let confirmedPending = false;
         try {
           if (action === "approve") {
             const accepted = await confirmAction(`确认批准档案 ${item.profile_id}（账号 ${item.account_id || "—"}）的${item.kind === "post" ? "帖子" : "评论"}？\n${target.textContent}\n${payload.text || ""}\n将按服务端当前审核与模拟运行设置处理。`, { confirmText: "批准并执行" });
@@ -135,6 +141,8 @@ export function createPublishing({ bridge, busy, confirmAction, metric, toast, f
           if (action === "approve") {
             const outcome = showResult(response, resultNode);
             item.status = response.review?.status || outcome;
+            confirmedPending = outcome === "pending" && response.policy_blocked === true && item.status === "pending"
+              || outcome === "dry_run" && item.status === "pending";
           }
           else {
             item.status = "rejected";
@@ -151,7 +159,7 @@ export function createPublishing({ bridge, busy, confirmAction, metric, toast, f
             : "无法完成操作，请检查 Dashboard 登录状态。";
         } finally {
           actions.delete(key);
-          if (!isUnloaded()) approve.disabled = reject.disabled = attempted;
+          if (!isUnloaded()) approve.disabled = reject.disabled = attempted && !confirmedPending;
         }
       });
     }

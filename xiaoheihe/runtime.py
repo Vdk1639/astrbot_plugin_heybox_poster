@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 import weakref
+import uuid
 from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
@@ -21,6 +22,7 @@ from .database import Database
 from .feed_service import FeedService
 from .logging_service import LoggingService
 from .models import EventState, RoutingTarget
+from .policy import PolicyBlockedError
 from .repository import Repository
 from .request_signing import ensure_client_identity
 from .security import redact_log_text, redact_text, sanitize_reply_text
@@ -109,6 +111,8 @@ class RuntimeServices:
                 raise RuntimeError("插件运行时已关闭")
             await self.database.open()
             interrupted_candidates = await self.repository.recover_interrupted_feed_sends()
+            if self.publisher is not None:
+                await self.publisher.reconcile()
             self._started = True
             await self.tasks.start("xhh-cleanup", self._cleanup_loop())
             await self.tasks.start("xhh-health", self._health_loop())
@@ -176,6 +180,23 @@ class RuntimeServices:
     def unregister_adapter(self, adapter: Any) -> None:
         self._adapters.discard(adapter)
 
+    def record_user_filter(self, profile_id: str, uid: str, reason: str) -> None:
+        key = f"user_filter:{profile_id}:{uid}"
+        previous = self._alerts.get(key)
+        if (previous or {}).get("reason", "") == reason:
+            return
+        if reason:
+            self._alerts[key] = dict(
+                key=key, reason=reason, level="warning", profile_id=profile_id,
+                message=f"档案 {profile_id} 的用户 {uid} 当前暂停通知处理",
+            )
+        else:
+            self._alerts.pop(key, None)
+        self.logging.emit(
+            "WARNING" if reason else "INFO", "用户通知处理状态已更新",
+            profile_id=profile_id, details=dict(sender_uid=uid, reason=reason),
+        )
+
     def set_configured_adapters(self, configs: list[dict]) -> None:
         self._configured_adapters = {
             str(config.get("id", "xiaoheihe")): {
@@ -241,13 +262,27 @@ class RuntimeServices:
         proactive: bool = False,
         reviewed: bool = False,
         expected_account_id: str = "",
+        send_key: str = "",
+        review_id: int | None = None,
+        admission_id: int | None = None,
     ) -> dict[str, Any]:
+        if not await self.current_reply_attempt(event_id, admission_id):
+            raise ValueError("回复处理尝试已变更，已抑制旧执行结果")
         if self.publisher is not None and not reviewed:
             return await self.publisher.submit_comment(
                 route, content, event_id=event_id, dry_run=dry_run,
                 proactive=proactive, generated_ms=generated_ms,
                 expected_account_id=expected_account_id,
             )
+        if event_id is not None:
+            bound_account = await self.repository.admission_account_id(event_id)
+            if bound_account:
+                if expected_account_id and expected_account_id != bound_account:
+                    raise CredentialInvalidError("回复账号与准入记录不匹配")
+                expected_account_id = bound_account
+            event = await self.repository.db.fetchone("SELECT status FROM incoming_events WHERE id=?", (event_id,))
+            if event and event["status"] in {"ignored", "dead_letter", "dry_run"}:
+                raise XiaoheiheApiError("原事件已经结束，已阻止再次发送", category="duplicate_send_guard")
         config = self.config.snapshot()
         text = sanitize_reply_text(content, int(config["reply"]["max_reply_chars"]))
         if event_id is not None:
@@ -284,13 +319,16 @@ class RuntimeServices:
         async with lock:
             client = await self.get_client(route.profile_id)
             if expected_account_id and (client.credentials is None or client.credentials.uid != expected_account_id):
-                raise CredentialInvalidError("账号已切换，不能发送旧账号的审核内容")
+                raise PolicyBlockedError("reply_account_changed", "账号已切换，原回复未发送")
             if reviewed and self.publisher is not None:
-                current = self.publisher.credentials(route.profile_id)
+                try:
+                    current = self.publisher.credentials(route.profile_id)
+                except ValueError as exc:
+                    raise PolicyBlockedError("reply_account_changed", "当前账号不可用，原回复未发送") from exc
                 if current.uid != expected_account_id:
-                    raise CredentialInvalidError("账号已切换，不能发送旧账号的审核内容")
+                    raise PolicyBlockedError("reply_account_changed", "账号已切换，原回复未发送")
                 if self.publisher.dry_run(route.profile_id, proactive=proactive):
-                    raise ValueError("发送前已开启模拟运行，已停止发送")
+                    raise PolicyBlockedError("reply_dry_run_changed", "发送前已开启模拟运行，未发送")
             if client.credentials is None:
                 if event_id is not None:
                     await self.repository.mark_event(
@@ -354,16 +392,67 @@ class RuntimeServices:
                             "该事件已有失败的评论发送记录，已阻止再次发送",
                             category="duplicate_send_guard",
                         )
-            outgoing_id = await self.repository.record_outgoing_attempt(
+            if reviewed and review_id is not None:
+                await self.publisher.check_comment_policy(self.publisher.queue.get(review_id))
+            send_key = send_key or (f"event:{event_id}" if event_id is not None else f"direct:{uuid.uuid4().hex}")
+            reservation = await self.repository.reserve_comment_attempt(
                 route.profile_id,
                 event_id,
                 route,
                 text,
-                "sending",
+                account_id=client.credentials.uid, send_key=send_key,
+                daily_limit=int(self.config.snapshot()["publishing"].get("comment_daily_limit", 30)),
             )
-            attempted_at = time.time()
+            if reservation.get("reason"):
+                message = "账号今日评论发送次数已达上限" if reservation["reason"] == "comment_account_daily_limit" else "账号已切换，原回复未发送"
+                raise PolicyBlockedError(reservation["reason"], message)
+            outgoing_id = int(reservation["id"])
+            if not reservation["created"]:
+                if reservation["status"] == "sent":
+                    return dict(status="sent", external_comment_id=reservation.get("external_comment_id", ""), duplicate_send_suppressed=True)
+                raise SendUncertainError("已有评论发送尝试，已阻止再次发送", category="send_unknown")
+            attempted_at = float(reservation["attempted_at"])
+            request_started = False
+            async def check_before_send():
+                checked_config = self.config.snapshot()
+                if reviewed and review_id is not None:
+                    await self.publisher.check_comment_policy(self.publisher.queue.get(review_id))
+                if self.config.snapshot() != checked_config:
+                    raise PolicyBlockedError("reply_policy_changed", "校验期间配置已更新，请重新审核")
+                if self.publisher is not None:
+                    try:
+                        current = self.publisher.credentials(route.profile_id)
+                    except ValueError as exc:
+                        raise PolicyBlockedError("reply_account_changed", "当前账号不可用，原回复未发送") from exc
+                    if current.uid != client.credentials.uid or (expected_account_id and current.uid != expected_account_id):
+                        raise PolicyBlockedError("reply_account_changed", "账号已切换，原回复未发送")
+                    if self.publisher.dry_run(route.profile_id, proactive=proactive):
+                        raise PolicyBlockedError("reply_dry_run_changed", "发送前已开启模拟运行，未发送")
+            async def begin_request():
+                nonlocal request_started, attempted_at
+                refreshed_config = self.config.snapshot()
+                refreshed = await self.repository.refresh_comment_attempt(
+                    outgoing_id, account_id=client.credentials.uid,
+                    daily_limit=refreshed_config["publishing"]["comment_daily_limit"],
+                )
+                if not refreshed["allowed"]:
+                    raise PolicyBlockedError(refreshed["reason"], "账号今日评论发送次数已达上限")
+                attempted_at = refreshed["attempted_at"]
+                await check_before_send()
+                if self.config.snapshot() != refreshed_config:
+                    raise PolicyBlockedError("reply_policy_changed", "校验期间配置已更新，请重新审核")
+                if int(time.time() // 86400) != int(attempted_at // 86400):
+                    raise PolicyBlockedError("reply_policy_changed", "校验期间日期已更新，请重新审核")
+                request_started = True
             try:
-                result = await client.send_comment(route, text)
+                await check_before_send()
+                result = await client.send_comment(route, text, before_send=begin_request)
+            except PolicyBlockedError:
+                await self.repository.db.execute(
+                    "UPDATE outgoing_replies SET status='retry_wait', error='本地策略拒绝，未发送' WHERE id=? AND status='sending'",
+                    (outgoing_id,),
+                )
+                raise
             except SendUncertainError as exc:
                 await self.repository.mark_event(
                     event_id, EventState.SEND_UNKNOWN, error=str(exc)
@@ -403,12 +492,13 @@ class RuntimeServices:
                 await self.repository.db.execute(
                     """
                     UPDATE outgoing_replies
-                    SET status = 'send_unknown', error = ?
+                    SET status = ?, error = ?
                     WHERE id = ?
                     """,
-                    ("发送任务取消，服务端状态未知", outgoing_id),
+                    ("send_unknown" if request_started else "retry_wait",
+                     "发送任务取消，服务端状态未知" if request_started else "本地校验取消，未发送", outgoing_id),
                 )
-                if event_id is not None:
+                if event_id is not None and request_started:
                     await self.repository.mark_event(
                         event_id,
                         EventState.SEND_UNKNOWN,
@@ -487,6 +577,13 @@ class RuntimeServices:
                         error=str(exc),
                     )
                 raise
+            except BaseException:
+                await self.repository.db.execute(
+                    "UPDATE outgoing_replies SET status=?, error=? WHERE id=? AND status='sending'",
+                    ("send_unknown" if request_started else "failed",
+                     "发送结果未知" if request_started else "本地校验失败，未发送", outgoing_id),
+                )
+                raise
             confirmation = await self.repository.confirm_outgoing(
                 outgoing_id,
                 result.external_comment_id,
@@ -505,6 +602,15 @@ class RuntimeServices:
                 "external_comment_id": result.external_comment_id,
                 "text": text,
             }
+
+    async def current_reply_attempt(self, event_id: int | None, admission_id: int | None) -> bool:
+        if admission_id is None:
+            return True
+        row = await self.repository.db.fetchone(
+            "SELECT id FROM reply_admissions WHERE incoming_event_id=? ORDER BY attempt_no DESC LIMIT 1",
+            (event_id,),
+        )
+        return row is not None and row["id"] == admission_id
 
     def _log_visual_context_binding(
         self,
@@ -551,7 +657,10 @@ class RuntimeServices:
         metadata: dict[str, Any],
         generated_ms: int | None = None,
         expected_account_id: str = "",
+        admission_id: int | None = None,
     ) -> int | None:
+        if not await self.current_reply_attempt(event_id, admission_id):
+            return None
         if self.publisher is not None:
             result = await self.publisher.submit_comment(
                 route, content, event_id=event_id, force_review=True,
@@ -585,18 +694,23 @@ class RuntimeServices:
         route: RoutingTarget,
         generated_ms: int,
         reply_timeout_seconds: int,
+        admission_id: int | None = None,
     ) -> None:
         error = (
             f"AstrBot 原生推理耗时 {generated_ms}ms，超过本事件 "
             f"{reply_timeout_seconds}s 回复截止时间；已抑制迟到评论以避免重复发送"
         )
         if event_id is not None:
-            await self.repository.mark_event(
-                event_id,
-                EventState.DEAD_LETTER,
-                error=error,
-                generated_ms=generated_ms,
+            if self.publisher is not None and self.publisher.queue.has_event(route.profile_id, event_id):
+                return
+            changed = await self.repository.db.execute(
+                "UPDATE incoming_events SET status='dead_letter', error=?, generated_ms=?, completed_at=?, updated_at=? "
+                "WHERE id=? AND status IN ('claimed','context_ready','dispatched') "
+                "AND (? IS NULL OR ?=(SELECT id FROM reply_admissions WHERE incoming_event_id=? ORDER BY attempt_no DESC LIMIT 1))",
+                (redact_text(error)[:2000], generated_ms, time.time(), time.time(), event_id, admission_id, admission_id, event_id),
             )
+            if changed.rowcount:
+                await self.repository.settle_reply_admission(event_id, "failed", release=True, admission_id=admission_id)
         self.logging.emit(
             "WARNING",
             error,
@@ -611,8 +725,13 @@ class RuntimeServices:
         route: RoutingTarget,
         error: str,
         generated_ms: int,
+        admission_id: int | None = None,
     ) -> None:
+        if not await self.current_reply_attempt(event_id, admission_id):
+            return
         if event_id is not None:
+            if self.publisher is not None and self.publisher.queue.has_event(route.profile_id, event_id):
+                return
             row = await self.repository.db.fetchone(
                 "SELECT status FROM incoming_events WHERE id = ?",
                 (event_id,),
@@ -624,18 +743,24 @@ class RuntimeServices:
                 EventState.SENT.value,
                 EventState.DRY_RUN.value,
                 EventState.DEAD_LETTER.value,
+                EventState.IGNORED.value,
             }:
-                await self.repository.mark_event(
+                changed = await self.repository.mark_event(
                     event_id,
                     EventState.GENERATED,
                     error=error,
                     generated_ms=generated_ms,
+                    admission_id=admission_id,
                 )
+                if not changed:
+                    return
                 await self.repository.schedule_retry(
                     event_id,
                     error,
                     max_retries=int(self.config.snapshot()["reply"]["max_retries"]),
+                    admission_id=admission_id,
                 )
+                await self.repository.settle_reply_admission(event_id, "failed", release=True, admission_id=admission_id)
         self.logging.emit(
             "WARNING",
             error,
@@ -810,6 +935,14 @@ class RuntimeServices:
                 {
                     **state,
                     **counters,
+                    "reply_budget": {
+                        **await self.repository.reply_budget_status(
+                            self.credentials.load(profile_id).uid if self.credentials.exists(profile_id) else f"dry-run:{profile_id}"
+                        ),
+                        "processing_limit": self.config.snapshot()["reply"].get("reply_daily_total", 30),
+                        "comment_limit": self.config.snapshot()["publishing"].get("comment_daily_limit", 30),
+                        "reset_local_time": "08:00", "unverified_shared": True,
+                    },
                     "dry_run": bool(profile.get("dry_run", True)),
                     "has_credentials": self.credentials.exists(profile_id),
                 }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import time
 from collections.abc import Callable
 from copy import deepcopy
@@ -11,6 +13,7 @@ from astrbot.api.web import error_response, json_response, request, stream_respo
 
 from . import __version__
 from .config_service import DEFAULT_CONFIG, ConfigValidationError
+from .models import EventState
 from .runtime import PLUGIN_NAME, RuntimeServices
 from .security import SecurityError, redact_data, redact_text, validate_profile_id
 from .topic_service import (
@@ -48,6 +51,11 @@ class WebApiController:
             ("config/save", self.config_save, ["POST"], "保存插件配置"),
             ("config/defaults", self.config_defaults, ["GET"], "读取默认配置"),
             ("events", self.events, ["GET"], "查询事件记录"),
+            ("risk/users", self.risk_users, ["GET"], "查询风险档案"),
+            ("risk/users/detail", self.risk_user_detail, ["GET"], "读取风险详情与审计"),
+            ("risk/users/block", self.risk_user_block, ["POST"], "人工封禁"),
+            ("risk/users/unblock", self.risk_user_unblock, ["POST"], "解除人工封禁"),
+            ("risk/users/adjust", self.risk_user_adjust, ["POST"], "调整风险分"),
             ("feed/candidates", self.feed_candidates, ["GET"], "查询审核候选"),
             (
                 "feed/topics/probe",
@@ -239,19 +247,173 @@ class WebApiController:
         if response := self._unauthorized():
             return response
         try:
+            group_by = request.query.get("group_by", "")
+            if group_by not in ("", "uid"):
+                raise ValueError
+            profile_id = await self._query_profile(request.query.get("profile_id", ""))
+            event_id = request.query.get("event_id", "")
+            if event_id != "":
+                if not isinstance(event_id, str) or not re.fullmatch(r"[0-9]{1,19}", event_id):
+                    raise ValueError
+                event_id = _positive_int(event_id, "event_id")
+                if event_id > 2**63 - 1:
+                    raise ValueError
+            else:
+                event_id = None
+            start_time = _optional_float(request.query.get("start_time"))
+            end_time = _optional_float(request.query.get("end_time"))
+            if start_time is not None and end_time is not None and start_time > end_time:
+                raise ValueError
+            status = str(request.query.get("status", ""))
+            if status and status not in {state.value for state in EventState}:
+                raise ValueError
+            page, page_size = _query_page()
+            filters = {}
+            if group_by or profile_id or event_id is not None:
+                filters = {"group_by": group_by, "profile_id": profile_id, "event_id": event_id}
+            if group_by == "uid":
+                filters["risk_config"] = self._risk_config()
+        except (TypeError, ValueError):
+            return error_response("事件查询参数无效", status_code=400)
+        except Exception:
+            return error_response("事件查询失败", status_code=500)
+        try:
             result = await self.runtime.repository.list_events(
-                status=str(request.query.get("status", "")),
+                status=status,
                 uid=str(request.query.get("uid", "")),
                 post_id=str(request.query.get("post_id", "")),
                 keyword=str(request.query.get("keyword", "")),
-                start_time=_optional_float(request.query.get("start_time")),
-                end_time=_optional_float(request.query.get("end_time")),
-                page=int(request.query.get("page", 1, type=int)),
-                page_size=int(request.query.get("page_size", 30, type=int)),
+                start_time=start_time,
+                end_time=end_time,
+                page=page,
+                page_size=page_size,
+                **filters,
             )
-            return json_response(result)
-        except (TypeError, ValueError) as exc:
-            return error_response(str(exc), status_code=400)
+            return json_response(redact_data(result))
+        except Exception:
+            return error_response("事件查询失败", status_code=500)
+
+    async def _query_profile(self, value: Any, *, required: bool = False) -> str:
+        if value == "" and not required:
+            return ""
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ValueError
+        profile_id = validate_profile_id(value)
+        try:
+            self.runtime.config.profile(profile_id)
+        except ConfigValidationError:
+            if not await self.runtime.repository.has_profile_events(profile_id):
+                raise ValueError from None
+        return profile_id
+
+    def _risk_config(self) -> dict[str, Any]:
+        config = self.runtime.config.snapshot()
+        return {
+            **config["risk"],
+            "owner_uids": {
+                profile["profile_id"]: profile.get("owner_uid", "")
+                for profile in config["profiles"]
+            },
+        }
+
+    async def risk_users(self):
+        if response := self._unauthorized():
+            return response
+        try:
+            profile_id = await self._query_profile(request.query.get("profile_id", ""))
+            uid = request.query.get("uid", "")
+            if uid != "":
+                uid = _risk_uid(uid)
+            level = request.query.get("level", "")
+            if level not in ("", "normal", "watch", "blocked"):
+                raise ValueError
+            manual_blocked = request.query.get("manual_blocked", "")
+            if manual_blocked not in ("", "true", "false"):
+                raise ValueError
+            manual_blocked = None if manual_blocked == "" else manual_blocked == "true"
+            page, page_size = _query_page()
+        except (TypeError, ValueError):
+            return error_response("风险查询参数无效", status_code=400)
+        except Exception:
+            return error_response("风险查询失败", status_code=500)
+        try:
+            result = await self.runtime.repository.list_risk_users(
+                profile_id=profile_id, uid=uid, level=level, manual_blocked=manual_blocked,
+                page=page, page_size=page_size,
+                risk_config=self._risk_config(),
+            )
+            return json_response(redact_data(result))
+        except Exception:
+            return error_response("风险查询失败", status_code=500)
+
+    async def risk_user_detail(self):
+        if response := self._unauthorized():
+            return response
+        try:
+            profile_id = await self._query_profile(
+                request.query.get("profile_id", ""), required=True,
+            )
+            uid = _risk_uid(request.query.get("uid", ""))
+            page, page_size = _query_page()
+        except (TypeError, ValueError):
+            return error_response("风险详情参数无效", status_code=400)
+        except Exception:
+            return error_response("风险详情读取失败", status_code=500)
+        try:
+            result = await self.runtime.repository.risk_user_detail(
+                profile_id, uid, page=page, page_size=page_size,
+                risk_config=self._risk_config(),
+            )
+            return json_response(redact_data(result))
+        except Exception:
+            return error_response("风险详情读取失败", status_code=500)
+
+    async def risk_user_block(self):
+        return await self._manage_risk_user("block")
+
+    async def risk_user_unblock(self):
+        return await self._manage_risk_user("unblock")
+
+    async def risk_user_adjust(self):
+        return await self._manage_risk_user("adjust")
+
+    async def _manage_risk_user(self, action: str):
+        if response := self._unauthorized():
+            return response
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict) or payload.get("confirm") is not True:
+                raise ValueError
+            profile_id = payload.get("profile_id", "")
+            if not isinstance(profile_id, str) or not profile_id or profile_id != profile_id.strip():
+                raise ValueError
+            profile_id = validate_profile_id(profile_id)
+            self.runtime.config.profile(profile_id)
+            uid = _risk_uid(payload.get("uid", ""))
+            note = payload.get("note")
+            if not isinstance(note, str) or len(note) > 200:
+                raise ValueError
+            reset_score = payload.get("reset_score", False)
+            if type(reset_score) is not bool or (action != "unblock" and reset_score):
+                raise ValueError
+            delta = payload.get("delta", 0)
+            if type(delta) is not int or not -1000 <= delta <= 1000:
+                raise ValueError
+            if action == "adjust" and "delta" not in payload:
+                raise ValueError
+        except (TypeError, ValueError):
+            return error_response("风险操作参数无效", status_code=400)
+        except Exception:
+            return error_response("风险操作失败，请刷新查看结果，勿重复提交", status_code=500)
+        try:
+            result = await self.runtime.repository.manage_risk_user(
+                profile_id, uid, action=action, note=redact_text(note.strip())[:200],
+                operator=request.username, delta=delta, reset_score=reset_score,
+                risk_config=self._risk_config(),
+            )
+            return json_response(redact_data(result))
+        except Exception:
+            return error_response("风险操作失败，请刷新查看结果，勿重复提交", status_code=500)
 
     async def feed_candidates(self):
         if response := self._unauthorized():
@@ -504,7 +666,25 @@ def _positive_int(value: str, name: str) -> int:
 def _optional_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
-    return float(value)
+    candidate = float(value)
+    if isinstance(value, bool) or not math.isfinite(candidate):
+        raise ValueError
+    return candidate
+
+
+def _query_page() -> tuple[int, int]:
+    return (
+        max(1, int(request.query.get("page", 1, type=int))),
+        max(1, min(100, int(request.query.get("page_size", 30, type=int)))),
+    )
+
+
+def _risk_uid(value: Any) -> str:
+    if type(value) is int:
+        value = str(value)
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,32}", value) or int(value) <= 0:
+        raise ValueError
+    return value
 
 
 def _safe_error(error: BaseException) -> str:

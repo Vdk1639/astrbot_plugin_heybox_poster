@@ -33,6 +33,8 @@ class NotificationService:
         permission_service: PermissionService,
         context_builder: ContextBuilder,
         dispatch: DispatchCallback,
+        credential_loader: Callable[[str], Any] | None = None,
+        risk_state_callback: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self.profile = profile
         self.profile_id = str(profile["profile_id"])
@@ -44,6 +46,8 @@ class NotificationService:
         self.permissions = permission_service
         self.context_builder = context_builder
         self.dispatch = dispatch
+        self.credential_loader = credential_loader
+        self.risk_state_callback = risk_state_callback
         network = config["network"]
         self._queue: asyncio.PriorityQueue[tuple[int, int, Notification]] = asyncio.PriorityQueue(
             maxsize=int(network["max_pending_events"])
@@ -171,6 +175,7 @@ class NotificationService:
                     if remaining_backfill <= 0:
                         break
                     remaining_backfill -= 1
+                    notification.is_backfill = True
                     queued = await self.enqueue(notification)
                     if not queued and not await self.repository.event_exists(
                         notification.profile_id,
@@ -374,7 +379,10 @@ class NotificationService:
             return False
         event_id = self._recovery_ids.get(event_key) if recovered else None
         if not recovered:
-            event_id = await self.repository.claim_event(notification)
+            event_id = await self.repository.claim_event(
+                notification, risk_config=self.config.get('risk'), owner_uid=self.permissions.owner_uid,
+                self_uid=self.permissions.self_uid,
+            )
             if event_id is None:
                 event_id = await self.repository.claim_retry_event(notification)
             if event_id is None:
@@ -490,6 +498,18 @@ class NotificationService:
                         error="插件重启时发现已有失败的评论发送记录，已停止自动重发",
                     )
                 continue
+            admission = await self.repository.db.fetchone(
+                "SELECT outcome FROM reply_admissions WHERE incoming_event_id = ? ORDER BY attempt_no DESC LIMIT 1",
+                (event_id,),
+            )
+            if admission and admission["outcome"] != "retry_wait":
+                if admission["outcome"] in {"processing", "context_ready", "dispatched"}:
+                    await self.repository.settle_reply_admission(event_id, "execution_unknown")
+                    await self.repository.mark_event(
+                        event_id, EventState.DEAD_LETTER,
+                        error="插件重启时通知已取得执行权，旧执行结果无法确认，已停止重复生成并保留楼层",
+                    )
+                continue
             if status == EventState.DISPATCHED.value:
                 await self.repository.mark_event(
                     event_id,
@@ -560,7 +580,10 @@ class NotificationService:
                     should_filter=True,
                 )
             return
-        event_id = event_id or await self.repository.claim_event(notification)
+        event_id = event_id or await self.repository.claim_event(
+            notification, risk_config=self.config.get('risk'), owner_uid=self.permissions.owner_uid,
+            self_uid=self.permissions.self_uid,
+        )
         if event_id is None:
             event_id = await self.repository.claim_retry_event(notification)
         if event_id is None:
@@ -586,37 +609,103 @@ class NotificationService:
                 },
             )
             return
-        decision = self.permissions.decide(notification)
-        if not decision.allowed:
-            await self.repository.mark_event(
-                event_id,
-                EventState.IGNORED,
-                error=decision.reason,
-                should_filter=True,
-            )
-            return
+        dispatched = False
+        admission_id = None
         try:
+            risk = await self.repository.evaluate_event_risk(
+                event_id, risk_config=self.config.get('risk'), owner_uid=self.permissions.owner_uid,
+                self_uid=self.permissions.self_uid,
+            )
+            if self.risk_state_callback is not None and notification.sender_uid_verified:
+                self.risk_state_callback(notification.profile_id, notification.sender_uid, risk['reason'])
+            if risk['reason']:
+                message = {'risk_manual_blocked': '用户已被人工封禁',
+                           'risk_auto_filtered': '用户风险分达到自动过滤阈值'}[risk['reason']]
+                await self.repository.mark_event(event_id, EventState.IGNORED, error=message,
+                                                 should_filter=True, reason=risk['reason'])
+                return
+            decision = self.permissions.decide(notification)
+            if not decision.allowed:
+                await self.repository.mark_event(event_id, EventState.IGNORED, error=decision.reason, should_filter=True)
+                return
+            credentials = getattr(self.client, "credentials", None)
+            account_id = str(getattr(credentials, "uid", "") or "")
+            reason = ""
+            if account_id and self.permissions.self_uid and account_id != self.permissions.self_uid:
+                reason = "reply_account_changed"
+            if not account_id:
+                reason = "reply_account_missing"
+            if self.credential_loader is not None:
+                current = self.credential_loader(self.profile_id)
+                current_uid = str(getattr(current, 'uid', '') or '')
+                if not current_uid:
+                    reason = 'reply_account_missing'
+                elif current_uid != account_id:
+                    reason = 'reply_account_changed'
+            reply = self.config["reply"]
+            admission = {"allowed": False, "reason": reason} if reason else await self.repository.reserve_reply_admission(
+                event_id, notification, account_id=account_id,
+                thread_once=reply.get("reply_thread_once", True),
+                user_daily_limit=reply.get("reply_daily_per_user", 5),
+                account_daily_limit=reply.get("reply_daily_total", 30),
+                dedup_days=self.config.get('retention', {}).get('dedup_days', 365),
+                owner_exempt=bool(reply.get("reply_owner_exempt", True) and decision.is_owner
+                                  and notification.sender_uid_verified and self.permissions.owner_uid
+                                  and notification.sender_uid == self.permissions.owner_uid),
+            )
+            if not admission["allowed"]:
+                reason = admission["reason"]
+                message = {
+                    "reply_scope_taken": "同一楼层已有回复任务或已回复",
+                    "reply_user_daily_limit": "该用户今日通知处理次数已达上限",
+                    "reply_account_daily_limit": "账号今日通知处理次数已达上限",
+                    "reply_account_changed": "通知所属账号已切换，已停止旧事件",
+                    "reply_account_missing": "通知缺少可信发送账号，已停止处理",
+                }[reason]
+                await self.repository.mark_event(event_id, EventState.IGNORED, error=message, should_filter=True, reason=reason)
+                self.logger.emit("INFO", message, profile_id=self.profile_id, details={"reason": reason, "event_id": event_id})
+                return
+            if not admission["created"]:
+                return
+            admission_id = admission['id']
+            if self.credential_loader is not None:
+                current = self.credential_loader(self.profile_id)
+                if str(getattr(current, 'uid', '') or '') != account_id:
+                    await self.repository.mark_event(
+                        event_id, EventState.IGNORED, error='通知所属账号已切换，已停止旧事件',
+                        reason='reply_account_changed', should_filter=True, admission_id=admission_id,
+                    )
+                    return
             context = await self.context_builder.build(
                 notification,
                 self.client,
             )
-            await self.repository.mark_event(event_id, EventState.CONTEXT_READY)
+            if not await self.repository.mark_event(event_id, EventState.CONTEXT_READY, admission_id=admission_id):
+                return
             async with self._floor_lock(notification.route.session_id):
                 await self.repository.record_session(notification.route)
-                await self.repository.mark_event(event_id, EventState.DISPATCHED)
+                if not await self.repository.mark_event(event_id, EventState.DISPATCHED, admission_id=admission_id):
+                    return
+                dispatched = True
                 await self.dispatch(event_id, notification, context, decision)
         except asyncio.CancelledError as exc:
+            if dispatched:
+                await self.repository.settle_reply_admission(event_id, "execution_unknown", admission_id=admission_id)
             await self.repository.schedule_retry(
                 event_id,
                 str(exc) or "事件处理任务被取消",
                 max_retries=int(self.config["reply"]["max_retries"]),
+                admission_id=admission_id,
             )
             raise
         except Exception as exc:
+            if dispatched:
+                await self.repository.settle_reply_admission(event_id, "execution_unknown", admission_id=admission_id)
             await self.repository.schedule_retry(
                 event_id,
                 str(exc),
                 max_retries=int(self.config["reply"]["max_retries"]),
+                admission_id=admission_id,
             )
             raise
 
@@ -730,6 +819,8 @@ def _notification_from_row(row: dict[str, Any], profile_id: str) -> Notification
         raw = {}
     timing = raw.get("_adapter_timing", {})
     timing = timing if isinstance(timing, dict) else {}
+    policy = raw.get("_adapter_policy", {})
+    policy = policy if isinstance(policy, dict) else {}
     discovered_at = float(row["discovered_at"])
     return Notification(
         profile_id=profile_id,
@@ -745,8 +836,10 @@ def _notification_from_row(row: dict[str, Any], profile_id: str) -> Notification
         content=str(row.get("content") or ""),
         created_at=_safe_time(timing.get("source_created_at"), discovered_at),
         observed_at=_safe_time(timing.get("observed_at"), discovered_at),
-        post_author_uid=str(raw.get("post_author_uid", "")),
-        explicit_wake=True,
+        source_time_provided=timing.get('source_time_provided') is True,
+        is_backfill=timing.get('is_backfill') is True,
+        post_author_uid=str(policy.get("post_author_uid", raw.get("post_author_uid", ""))),
+        explicit_wake=policy.get("explicit_wake", True) is True,
         image_urls=[str(value) for value in raw.get("image_urls", []) if isinstance(value, str)],
         raw=raw,
     )

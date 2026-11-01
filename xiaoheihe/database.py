@@ -326,7 +326,74 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
             ADD COLUMN owner_role TEXT NOT NULL DEFAULT 'unknown';
         """,
     ),
+    (
+        11,
+        """
+        ALTER TABLE incoming_events ADD COLUMN reply_account_id TEXT NOT NULL DEFAULT '';
+        CREATE TABLE reply_admissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incoming_event_id INTEGER NOT NULL REFERENCES incoming_events(id),
+            attempt_no INTEGER NOT NULL,
+            profile_id TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            sender_key TEXT NOT NULL,
+            day TEXT NOT NULL,
+            charged INTEGER NOT NULL DEFAULT 1 CHECK(charged IN (0, 1)),
+            admitted_at REAL NOT NULL,
+            post_id TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            floor_active INTEGER NOT NULL DEFAULT 1 CHECK(floor_active IN (0, 1)),
+            outcome TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(incoming_event_id, attempt_no)
+        );
+        CREATE UNIQUE INDEX idx_reply_active_scope
+            ON reply_admissions(account_id, scope_key) WHERE floor_active = 1;
+        CREATE INDEX idx_reply_account_day ON reply_admissions(account_id, day);
+        CREATE INDEX idx_reply_sender_day ON reply_admissions(account_id, sender_key, day);
+        ALTER TABLE outgoing_replies ADD COLUMN account_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE outgoing_replies ADD COLUMN send_key TEXT NOT NULL DEFAULT '';
+        ALTER TABLE outgoing_replies ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1;
+        CREATE UNIQUE INDEX idx_comment_send_key
+            ON outgoing_replies(account_id, send_key, attempt_no) WHERE send_key != '';
+        CREATE INDEX idx_comment_account_time ON outgoing_replies(account_id, attempted_at);
+        """,
+    ),
 )
+
+# Historical rows stay permanently skipped; only first ingestion can opt in.
+MIGRATIONS += ((12, """
+    ALTER TABLE incoming_events ADD COLUMN risk_state TEXT NOT NULL DEFAULT 'skipped_legacy';
+    ALTER TABLE incoming_events ADD COLUMN risk_evaluated_at REAL;
+    ALTER TABLE incoming_events ADD COLUMN risk_delta INTEGER;
+    ALTER TABLE incoming_events ADD COLUMN risk_score_after INTEGER;
+    ALTER TABLE incoming_events ADD COLUMN risk_hits TEXT;
+    ALTER TABLE incoming_events ADD COLUMN risk_content_hash TEXT NOT NULL DEFAULT '';
+    ALTER TABLE incoming_events ADD COLUMN risk_text_eligible INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE incoming_events ADD COLUMN risk_behavior_eligible INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE incoming_events ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+    CREATE TABLE user_risk (
+        profile_id TEXT NOT NULL, sender_uid TEXT NOT NULL,
+        score INTEGER NOT NULL DEFAULT 0 CHECK(score BETWEEN 0 AND 1000),
+        manual_blocked INTEGER NOT NULL DEFAULT 0 CHECK(manual_blocked IN (0,1)),
+        note TEXT NOT NULL DEFAULT '', last_hit_at REAL,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        PRIMARY KEY(profile_id,sender_uid)
+    );
+    CREATE TABLE user_risk_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id TEXT NOT NULL, sender_uid TEXT NOT NULL,
+        incoming_event_id INTEGER REFERENCES incoming_events(id) ON DELETE SET NULL,
+        rule TEXT NOT NULL, delta INTEGER NOT NULL,
+        before_score INTEGER NOT NULL, after_score INTEGER NOT NULL,
+        rule_key TEXT NOT NULL DEFAULT '', rule_version TEXT NOT NULL DEFAULT '1',
+        details TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, operator TEXT
+    );
+    CREATE UNIQUE INDEX idx_risk_event_rule ON user_risk_events(incoming_event_id,rule)
+        WHERE incoming_event_id IS NOT NULL;
+    CREATE INDEX idx_risk_user_time ON user_risk_events(profile_id,sender_uid,created_at DESC,id DESC);
+    CREATE INDEX idx_risk_rule_cooldown ON user_risk_events(profile_id,sender_uid,rule_key,created_at DESC);
+"""),)
 
 MIGRATION_MARKERS = {
     1: "INSERT INTO schema_migrations(version) VALUES (1);",
@@ -339,6 +406,8 @@ MIGRATION_MARKERS = {
     8: "INSERT INTO schema_migrations(version) VALUES (8);",
     9: "INSERT INTO schema_migrations(version) VALUES (9);",
     10: "INSERT INTO schema_migrations(version) VALUES (10);",
+    11: "INSERT INTO schema_migrations(version) VALUES (11);",
+    12: "INSERT INTO schema_migrations(version) VALUES (12);",
 }
 
 
@@ -361,6 +430,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = await aiosqlite.connect(self.path)
         self._connection.row_factory = aiosqlite.Row
+        await self._connection.create_function('py_strip', 1, lambda value: str(value or '').strip(), deterministic=True)
         await self._connection.execute("PRAGMA journal_mode=WAL")
         await self._connection.execute("PRAGMA foreign_keys=ON")
         await self._connection.execute("PRAGMA busy_timeout=5000")

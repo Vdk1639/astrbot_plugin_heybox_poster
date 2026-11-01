@@ -331,7 +331,9 @@ class XiaoheiheApiClient:
             raise error from exc
         return _merge_post_and_thread_context(post_context, thread_context)
 
-    async def send_comment(self, route: RoutingTarget, content: str) -> SendResult:
+    async def send_comment(
+        self, route: RoutingTarget, content: str, *, before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> SendResult:
         body = {
             "is_cy": "0",
             "link_id": route.post_id,
@@ -339,7 +341,7 @@ class XiaoheiheApiClient:
             "root_id": route.root_comment_id or "-1",
             "text": content,
         }
-        response = await self._request(EndpointName.CREATE_COMMENT, form_body=body)
+        response = await self._request(EndpointName.CREATE_COMMENT, form_body=body, before_request=before_send)
         try:
             return parse_send_result(response.payload)
         except ResponseShapeError as exc:
@@ -389,6 +391,7 @@ class XiaoheiheApiClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         form_body: dict[str, Any] | None = None,
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> ApiResponse:
         await self.start()
         if self._client is None:
@@ -439,6 +442,8 @@ class XiaoheiheApiClient:
         retry_count = 0
         while True:
             await self._limiter.wait()
+            if before_request is not None:
+                await before_request()
             try:
                 response = await self._client.request(
                     contract.method,

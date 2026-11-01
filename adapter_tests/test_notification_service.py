@@ -4,6 +4,7 @@ import asyncio
 import copy
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,6 +36,7 @@ def notice(identifier: str, created_at: float) -> Notification:
 
 
 class FakeClient:
+    credentials = SimpleNamespace(uid='bot', nickname='Bot')
     def __init__(self, notifications):
         self.notifications = notifications
 
@@ -154,6 +156,7 @@ async def test_real_type_17_mention_reaches_event_record(repository) -> None:
     )
 
     class FixtureClient:
+        credentials = FakeClient.credentials
         async def fetch_notifications(self, event_type, **kwargs):
             if event_type is NotificationType.MENTION:
                 return parsed
@@ -337,6 +340,7 @@ async def test_poll_uses_pages_and_skips_duplicate_claim(repository) -> None:
     dispatched = []
 
     class PagedClient:
+        credentials = FakeClient.credentials
         async def fetch_notifications(self, event_type, *, cursor, page, page_size):
             calls.append((event_type, cursor, page, page_size))
             if page == 1:
@@ -669,6 +673,7 @@ async def test_same_floor_dispatch_is_serialized(repository) -> None:
         active -= 1
 
     service = make_service(repository, [], dispatch)
+    service.config['reply']['reply_thread_once'] = False
     first = notice("floor-one", time.time())
     second = notice("floor-two", time.time())
     await asyncio.gather(service._handle(first), service._handle(second))

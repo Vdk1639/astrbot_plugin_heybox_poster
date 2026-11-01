@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import time
+import uuid
 from typing import Any
 
 
@@ -101,6 +102,14 @@ class ReviewQueue:
                     """
                 )
                 self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS review_sources ON review_events(review_id)"
+                )
+                columns = {row[1] for row in self._conn.execute("PRAGMA table_info(review_events)")}
+                if "source_context" not in columns:
+                    self._conn.execute("ALTER TABLE review_events ADD COLUMN source_context TEXT NOT NULL DEFAULT '{}'")
+                if "claim_token" not in {row[1] for row in self._conn.execute("PRAGMA table_info(reviews)")}:
+                    self._conn.execute("ALTER TABLE reviews ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''")
+                self._conn.execute(
                     "UPDATE reviews SET status='send_unknown', updated_at=? WHERE status='sending'",
                     (time.time(),),
                 )
@@ -110,7 +119,7 @@ class ReviewQueue:
 
     def submit(
         self, kind: str, profile_id: str, account_id: str, payload: dict[str, Any],
-        *, source: str = "", source_id: str = "",
+        *, source: str = "", source_id: str = "", source_context: dict | None = None,
     ) -> dict[str, Any]:
         if kind not in ("post", "comment"):
             raise ValueError("审核类型只能是 post 或 comment")
@@ -121,6 +130,7 @@ class ReviewQueue:
         if not isinstance(payload, dict):
             raise ValueError("payload 必须是 dict")
         encoded = _encode_json(payload)
+        encoded_context = _encode_json(source_context or {})
         fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         event = (kind, profile_id, account_id, source, source_id)
         with self._conn:
@@ -150,9 +160,9 @@ class ReviewQueue:
                 row = self._conn.execute("SELECT * FROM reviews WHERE id=?", (cursor.lastrowid,)).fetchone()
             if source_id:
                 self._conn.execute(
-                    "INSERT INTO review_events (kind, profile_id, account_id, source, source_id, review_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (*event, row["id"]),
+                    "INSERT INTO review_events (kind, profile_id, account_id, source, source_id, review_id, source_context) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (*event, row["id"], encoded_context),
                 )
             return _decode_row(row)
 
@@ -183,13 +193,49 @@ class ReviewQueue:
     def claim(self, review_id: int, *, profile_id: str, account_id: str) -> dict[str, Any]:
         with self._conn:
             cursor = self._conn.execute(
-                "UPDATE reviews SET status='sending', updated_at=? "
+                "UPDATE reviews SET status='sending', updated_at=?, claim_token=? "
                 "WHERE id=? AND status='pending' AND profile_id=? AND account_id=?",
-                (time.time(), review_id, profile_id, account_id),
+                (time.time(), uuid.uuid4().hex, review_id, profile_id, account_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("审核项不是待审核状态，或档案、账号不匹配")
             return self.get(review_id)
+
+    def sources(self, review_id: int) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM review_events WHERE review_id=?", (review_id,)).fetchall()
+        return [dict(row, source_context=json.loads(row["source_context"])) for row in rows]
+
+    def all_comments(self) -> list[dict[str, Any]]:
+        return [_decode_row(row) for row in self._conn.execute("SELECT * FROM reviews WHERE kind='comment'")]
+
+    def has_event(self, profile_id: str, event_id: int) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM review_events WHERE kind='comment' AND profile_id=? "
+            "AND source IN ('notification','proactive') AND source_id=? "
+            "UNION ALL SELECT 1 FROM reviews WHERE kind='comment' AND profile_id=? "
+            "AND source IN ('notification','proactive') AND source_id=? LIMIT 1",
+            (profile_id, str(event_id), profile_id, str(event_id)),
+        ).fetchone() is not None
+
+    def release_claim(self, review_id: int, claim_token: str, error: str) -> dict[str, Any]:
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE reviews SET status='pending', error=?, updated_at=? "
+                "WHERE id=? AND status='sending' AND claim_token=?",
+                (error, time.time(), review_id, claim_token),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("审核领取已变更，不能恢复待审")
+        return self.get(review_id)
+
+    def confirm_recovered(self, review_id: int, result: dict) -> dict[str, Any]:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE reviews SET status='sent', result=?, error='', updated_at=? "
+                "WHERE id=? AND status='send_unknown'",
+                (_encode_json(result), time.time(), review_id),
+            )
+        return self.get(review_id)
 
     def finish(
         self, review_id: int, status: str, *, result: Any = None, error: str = "",

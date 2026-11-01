@@ -58,6 +58,11 @@ class Outbox:
                 (key, until),
             )
 
+    def release_cooldown(self, key: str, expected_until: float) -> None:
+        conn = self._get_conn()
+        with conn:
+            conn.execute("DELETE FROM cooldowns WHERE key=? AND until=?", (key, expected_until))
+
     def cooldown_until(self, key: str) -> float:
         conn = self._get_conn()
         row = conn.execute("SELECT until FROM cooldowns WHERE key=?", (key,)).fetchone()

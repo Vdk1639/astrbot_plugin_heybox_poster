@@ -2,6 +2,7 @@ import { bridge } from "./bridge.js";
 import { createPublishing } from "./publishing.js";
 const state = {
   config: null,
+  savedConfig: null,
   configSchema: null,
   status: null,
   loginTimer: null,
@@ -13,6 +14,17 @@ const state = {
   logs: [],
   eventPage: 1,
   eventPages: 1,
+  eventId: "",
+  eventBack: null,
+  eventRangeInitialized: false,
+  riskPage: 1,
+  riskPages: 1,
+  riskSelected: null,
+  riskAuditPage: 1,
+  riskAuditPages: 1,
+  riskDetailLoaded: false,
+  riskActionBusy: false,
+  riskUncertain: false,
   toastTimer: null,
   confirmResolve: null,
   confirmPreviousFocus: null,
@@ -162,7 +174,8 @@ function table(headers, rows) {
     row.forEach((value, index) => {
       const cell = document.createElement("td");
       if (index === row.length - 1) cell.className = "wrap";
-      cell.textContent = text(value);
+      if (value instanceof Node) cell.append(value);
+      else cell.textContent = text(value);
       tr.append(cell);
     });
     body.append(tr);
@@ -183,10 +196,18 @@ async function loadConfig() {
   ]);
   if (!currentRequest("config", version)) return;
   state.config = config;
+  state.savedConfig = structuredClone(config);
   state.configSchema = schema;
   renderConfigForm();
   populateProfileSelect();
   publishing.configure(config);
+  $("event-profile-options").replaceChildren(...(config.profiles || []).map((profile) => {
+    const option = document.createElement("option");
+    option.value = profile.profile_id;
+    option.textContent = profile.display_name || profile.profile_id;
+    return option;
+  }));
+  updateRiskActions();
 }
 
 function populateProfileSelect() {
@@ -287,21 +308,26 @@ function createScalarField(key, descriptor, value, update) {
     control.value = value ?? descriptor.default ?? "";
     if (numeric) {
       const slider = descriptor.slider || {};
-      if (slider.min !== undefined) control.min = String(slider.min);
-      if (slider.max !== undefined) control.max = String(slider.max);
+      const minimum = descriptor.min ?? slider.min;
+      const maximum = descriptor.max ?? slider.max;
+      if (minimum !== undefined) control.min = String(minimum);
+      if (maximum !== undefined) control.max = String(maximum);
       control.step = String(slider.step ?? (descriptor.type === "int" ? 1 : 0.1));
-      control.addEventListener("change", () => {
-        const parsed = descriptor.type === "int"
-          ? Number.parseInt(control.value, 10)
-          : Number.parseFloat(control.value);
-        if (Number.isFinite(parsed)) {
+      const readNumber = () => {
+        const parsed = Number(control.value);
+        if (control.value.trim() && Number.isFinite(parsed)
+          && (descriptor.type !== "int" || Number.isInteger(parsed))
+          && (minimum === undefined || parsed >= minimum)
+          && (maximum === undefined || parsed <= maximum)) {
           update(parsed);
           control.setCustomValidity("");
         } else {
-          control.setCustomValidity("请输入有效数字");
+          control.setCustomValidity("请输入范围内的有效数字（整数配置不接受小数）");
           control.reportValidity();
         }
-      });
+      };
+      control.addEventListener("input", readNumber);
+      control.addEventListener("change", readNumber);
     } else {
       control.addEventListener("input", () => update(control.value));
     }
@@ -460,6 +486,17 @@ async function loadStatus() {
       Number(first.circuit_open_until || 0) > Date.now() / 1000 ? "已打开" : "正常",
     ),
   );
+  $("reply-budgets").replaceChildren(...profiles.flatMap((profile) => {
+    const budget = profile.reply_budget;
+    const label = profile.display_name || profile.profile_id || "账号";
+    if (!budget) return [metric(`${label} · 今日额度`, "未提供")];
+    const limit = (value) => value === 0 ? "不限" : text(value);
+    return [
+      metric(`${label} · 今日通知处理`, `${text(budget.processing_count)} / ${limit(budget.processing_limit)}`),
+      metric(`${label} · 今日真实评论`, `${text(budget.comment_count)} / ${limit(budget.comment_limit)}`),
+      metric(`${label} · 重置 / 缺 UID`, `北京时间 ${budget.reset_local_time || "08:00"}（UTC 0 点） / ${budget.unverified_shared ? "共用预算桶" : "未提供"}`),
+    ];
+  }));
   const adapters = state.status.adapters || [];
   const adapterHost = $("adapter-list");
   adapterHost.replaceChildren(table(
@@ -640,7 +677,11 @@ async function loadEvents() {
   const version = nextRequest("events");
   const start = $("event-start").value;
   const end = $("event-end").value;
+  const grouped = $("event-mode").value === "uid";
   const result = await bridge.apiGet("events", {
+    group_by: $("event-mode").value,
+    profile_id: $("event-profile").value.trim(),
+    event_id: state.eventId,
     status: $("event-status").value,
     uid: $("event-uid").value.trim(),
     post_id: $("event-post").value.trim(),
@@ -652,20 +693,231 @@ async function loadEvents() {
   });
   if (!currentRequest("events", version)) return;
   state.eventPages = Math.max(1, Math.ceil(result.total / result.page_size));
-  $("event-page").textContent = `第 ${result.page} / ${state.eventPages} 页，共 ${result.total} 条`;
+  $("event-page").textContent = `第 ${result.page} / ${state.eventPages} 页，共 ${result.total} ${grouped ? "组用户记录" : "条"}`;
   $("event-prev").disabled = result.page <= 1;
   $("event-next").disabled = result.page >= state.eventPages;
-  $("event-table").replaceChildren(table(
-    ["时间", "类型", "状态", "UID", "帖子 / 楼层", "内容 / 结果"],
+  $("event-range-hint").textContent = `${start || "不限开始"} 至 ${end || "不限结束"}${state.eventId ? ` · 单事件 ID ${state.eventId}` : ""}。输入为浏览器本地时间，列表显示北京时间；统计仅含当前筛选结果。`;
+  if (grouped) {
+    $("event-table").replaceChildren(table(
+      ["档案 / UID", "最新昵称", "事件 / 帖子", "状态 / 类型分布", "最近处理 / 发现", "当前风险", "操作"],
+      result.items.map((item) => [
+        `${item.profile_id} / ${item.identity_verified === false || !item.sender_uid ? "UID 未提供" : item.sender_uid}`,
+        item.sender_nickname,
+        `${item.event_count} / ${item.post_count}`,
+        `${distribution(item.status_counts, eventStatusText)}\n${distribution(item.event_type_counts, eventTypeText)}`,
+        `${formatTime(item.last_event_at)}\n${formatTime(item.last_discovered_at)}`,
+        riskStatus(item), userActions(item),
+      ]),
+    ));
+  } else $("event-table").replaceChildren(table(
+    ["时间", "档案", "类型", "状态", "UID", "帖子 / 楼层", "风险评估 / 行为资格", "内容 / 结果"],
     result.items.map((item) => [
       formatTime(item.event_time || item.discovered_at),
+      item.profile_id,
       eventTypeText(item.event_type),
       eventStatusText(item.status),
-      item.sender_uid,
+      item.sender_uid || "UID 未提供（不能可靠归属或封禁）",
       `${item.post_id} / ${item.root_comment_id || "帖子"}`,
+      eventRiskText(item),
       `${item.content || ""}\n${item.reply_text ? `→ ${item.reply_text}` : ""}\n${item.error || ""}`.trim(),
     ]),
   ));
+}
+
+function eventRiskText(item) {
+  const state = String(item.risk_state || "");
+  const label = {
+    evaluated: "已评估", pending: "待评估", skipped_legacy: "旧库未评估（不回评）",
+    skipped_disabled: "永久跳过（评分关闭）", skipped_source: "永久跳过（非通知来源）",
+    skipped_uid: "永久跳过（缺 UID）", skipped_self: "永久跳过（自身消息）",
+    skipped_owner: "永久跳过（主人豁免）",
+  }[state] || (state.startsWith("skipped_") ? `永久跳过（${state}）` : state || "未评估（旧记录或 API 未提供状态）");
+  const eligible = item.risk_behavior_eligible;
+  const behavior = eligible === false || eligible === 0 ? "历史回填或时间不明，未计短时风险"
+    : eligible === true || eligible === 1 ? "具备短时行为资格" : "短时行为资格未提供";
+  const evaluation = state === "evaluated"
+    ? ` · ${formatTime(item.risk_evaluated_at)} · 本事件增分 ${text(item.risk_delta)} · 评估后分数 ${text(item.risk_score_after)} · 命中 ${Array.isArray(item.risk_hits) ? item.risk_hits.join("、") || "无" : text(item.risk_hits)}`
+    : "";
+  return `${label}${evaluation}\n${behavior}${item.reason ? `\n原因：${item.reason}` : ""}`;
+}
+
+function distribution(counts, label) {
+  return Object.entries(counts || {}).map(([key, value]) => `${label(key)} ${value}`).join("、") || "—";
+}
+
+function riskStatus(user) {
+  const score = user.score ?? user.risk_score;
+  if (user.manual_blocked) return `${text(score)} 分 · 人工封禁`;
+  if (user.has_record === false) return "无风险档案（不表示已评估全部事件）";
+  if (score === null || score === undefined) return "未启用/未接入";
+  const level = user.level || user.risk_level;
+  const status = user.auto_filtered ? "自动过滤生效"
+    : level === "blocked" ? "已达阈值，自动过滤未生效" : level === "watch" ? "观察" : "正常";
+  return `${score} 分 · ${status}`;
+}
+
+function userActions(user) {
+  const row = document.createElement("div");
+  row.className = "button-row";
+  const drill = document.createElement("button");
+  drill.type = "button";
+  drill.textContent = "查看事件";
+  drill.addEventListener("click", () => busy(drill, () => drillEvents(user)));
+  const detail = document.createElement("button");
+  detail.type = "button";
+  detail.className = "secondary";
+  detail.textContent = "风险记录";
+  detail.disabled = user.identity_verified === false || !String(user.sender_uid || "").trim();
+  detail.addEventListener("click", () => busy(detail, () => loadRiskDetail(user.profile_id, user.sender_uid)));
+  row.append(drill, detail);
+  if (detail.disabled) {
+    const hint = document.createElement("span");
+    hint.textContent = "UID 未提供，不能可靠归属；仅可查看单事件";
+    row.append(hint);
+  }
+  return row;
+}
+
+const eventFilterIds = ["event-mode", "event-profile", "event-status", "event-uid", "event-post", "event-keyword", "event-start", "event-end"];
+
+async function drillEvents(user) {
+  if (!state.eventBack) state.eventBack = {
+    page: state.eventPage,
+    values: eventFilterIds.map((id) => $(id).value),
+  };
+  $("event-mode").value = "";
+  $("event-profile").value = user.profile_id;
+  $("event-uid").value = user.identity_verified === false ? "" : user.sender_uid || "";
+  state.eventId = user.identity_verified === false || !user.sender_uid ? user.event_id : "";
+  state.eventPage = 1;
+  $("event-back").hidden = false;
+  closeRiskDetail();
+  nextRequest("risk-users");
+  await Promise.all([loadEvents(), loadRiskUsers()]);
+}
+
+async function loadRiskUsers() {
+  const version = nextRequest("risk-users");
+  const result = await bridge.apiGet("risk/users", {
+    profile_id: $("event-profile").value.trim(), uid: $("risk-uid").value.trim(),
+    level: $("risk-level").value, manual_blocked: $("risk-manual").value,
+    page: state.riskPage, page_size: 30,
+  });
+  if (!currentRequest("risk-users", version)) return;
+  state.riskPages = Math.max(1, Math.ceil(result.total / result.page_size));
+  $("risk-page").textContent = `第 ${result.page} / ${state.riskPages} 页，共 ${result.total} 条风险档案`;
+  $("risk-prev").disabled = result.page <= 1;
+  $("risk-next").disabled = result.page >= state.riskPages;
+  $("risk-users").replaceChildren(table(["档案 / UID", "当前风险", "操作"], result.items.map((user) => [
+    `${user.profile_id} / ${user.sender_uid}`, riskStatus(user), userActions(user),
+  ])));
+}
+
+function closeRiskDetail() {
+  nextRequest("risk-detail");
+  state.riskSelected = null;
+  state.riskDetailLoaded = false;
+  if (state.confirmResolve && state.riskActionBusy) closeConfirmation(false);
+  $("risk-detail").hidden = true;
+  updateRiskActions();
+}
+
+function updateRiskActions() {
+  const currentProfile = (state.savedConfig?.profiles || []).some((profile) => profile.profile_id === state.riskSelected?.profile_id);
+  const disabled = !state.riskDetailLoaded || !currentProfile || state.riskActionBusy || state.riskUncertain;
+  for (const id of ["risk-block", "risk-unblock", "risk-adjust"]) $(id).disabled = disabled;
+  for (const id of ["refresh-risk", "risk-audit-prev", "risk-audit-next"]) {
+    $(id).disabled = !state.riskSelected || state.riskActionBusy
+      || id === "risk-audit-prev" && state.riskAuditPage <= 1
+      || id === "risk-audit-next" && state.riskAuditPage >= state.riskAuditPages;
+  }
+}
+
+async function loadRiskDetail(profile_id, uid, page = 1) {
+  const changedUser = state.riskSelected?.profile_id !== profile_id || state.riskSelected?.uid !== uid;
+  if (changedUser) {
+    $("risk-operation-note").value = "";
+    $("risk-reset").checked = false;
+    $("risk-delta").value = "0";
+  }
+  const version = nextRequest("risk-detail");
+  state.riskSelected = { profile_id, uid };
+  state.riskDetailLoaded = false;
+  $("risk-detail").hidden = false;
+  $("risk-facts").replaceChildren();
+  $("risk-audit").replaceChildren();
+  $("risk-note").textContent = "";
+  $("risk-result").textContent = "正在加载风险详情…";
+  updateRiskActions();
+  const result = await bridge.apiGet("risk/users/detail", { profile_id, uid, page, page_size: 30 });
+  if (!currentRequest("risk-detail", version)) return;
+  const user = result.user;
+  const audit = result.events;
+  if (!user || user.profile_id !== profile_id || user.sender_uid !== uid || !audit) throw new Error("风险详情身份或返回结构不匹配");
+  state.riskAuditPage = audit.page;
+  state.riskAuditPages = Math.max(1, Math.ceil(audit.total / audit.page_size));
+  state.riskDetailLoaded = true;
+  state.riskUncertain = false;
+  const policy = state.savedConfig?.risk;
+  $("risk-facts").replaceChildren(
+    metric("档案 / UID", `${profile_id} / ${uid}`), metric("当前风险", riskStatus(user)),
+    metric("自动评分", policy ? policy.enabled ? "开启" : "关闭" : "未接入"),
+    metric("自动过滤开关", policy ? policy.auto_filter_enabled ? "开启" : "关闭" : "未接入"),
+    metric("人工封禁", user.manual_blocked ? "生效（独立于评分开关）" : "未封禁"),
+    metric("最近命中", formatTime(user.last_hit_at)),
+    metric("最近更新", formatTime(user.updated_at)),
+  );
+  $("risk-note").textContent = `备注：${user.note || "无"}`;
+  $("risk-result").textContent = user.manual_blocked || user.auto_filtered
+    ? "当前风险策略阻止处理；其他硬名单和限额仍独立生效。"
+    : "当前未被风险策略拦截；硬名单和处理/发送限额仍可能阻止。";
+  if (!user.manual_blocked && user.auto_filtered) $("risk-result").textContent = "当前无人工封禁，但风险阈值仍阻止处理；硬名单和限额仍独立生效。";
+  if (!(state.savedConfig?.profiles || []).some((profile) => profile.profile_id === profile_id)) $("risk-result").textContent += " 历史档案仅供查看。";
+  $("risk-audit").replaceChildren(table(["时间", "关联事件", "规则 / 操作", "实际增减", "分数变化", "操作者 / 详情"], audit.items.map((item) => [
+    formatTime(item.created_at), item.incoming_event_id, item.rule, item.delta, `${text(item.before_score)} → ${text(item.after_score)}`,
+    `${item.operator || "自动"}\n${typeof item.details === "object" ? JSON.stringify(item.details) : item.details || item.detail || ""}`,
+  ])));
+  $("risk-audit-page").textContent = `第 ${audit.page} / ${state.riskAuditPages} 页，共 ${audit.total} 条审计`;
+  $("risk-audit-prev").disabled = audit.page <= 1;
+  $("risk-audit-next").disabled = audit.page >= state.riskAuditPages;
+  updateRiskActions();
+}
+
+async function changeRisk(action) {
+  if (!state.riskSelected || !state.riskDetailLoaded || state.riskActionBusy || state.riskUncertain) return;
+  if (!(state.savedConfig?.profiles || []).some((profile) => profile.profile_id === state.riskSelected.profile_id)) return;
+  const target = { ...state.riskSelected };
+  const version = state.requests["risk-detail"];
+  const note = $("risk-operation-note").value;
+  const deltaText = $("risk-delta").value.trim();
+  const delta = Number(deltaText);
+  const reset_score = $("risk-reset").checked;
+  if (note.length > 200) throw new Error("备注不能超过 200 字");
+  if (action === "adjust" && (!deltaText || !Number.isInteger(delta) || delta < -1000 || delta > 1000)) throw new Error("调整分数须为 -1000..1000 的整数");
+  state.riskActionBusy = true;
+  updateRiskActions();
+  let attempted = false;
+  try {
+    const label = { block: "人工封禁", unblock: "解除人工封禁", adjust: "调整分数" }[action];
+    const accepted = await confirmAction(`确认${label}？\n档案 ${target.profile_id} · UID ${target.uid}\n备注：${note || "无"}\n${action === "adjust" ? `调整 ${delta} 分` : action === "unblock" ? `清零分数：${reset_score ? "是" : "否"}；不移除硬黑名单` : "人工封禁独立于评分开关"}`, { confirmText: label, danger: action === "block" });
+    if (!accepted || !currentRequest("risk-detail", version)) return;
+    attempted = true;
+    await bridge.apiPost(`risk/users/${action}`, { ...target, note, confirm: true,
+      ...(action === "adjust" ? { delta } : action === "unblock" ? { reset_score } : {}),
+    });
+    if (!currentRequest("risk-detail", version)) return;
+    toast("风险操作已记录；解除人工封禁不代表其他过滤原因已解除。");
+    await Promise.all([loadRiskDetail(target.profile_id, target.uid), loadRiskUsers(), loadEvents()]);
+  } catch (error) {
+    if (currentRequest("risk-detail", version)) {
+      state.riskUncertain = attempted;
+      $("risk-result").textContent = attempted ? "操作结果未确认；请刷新详情并核对审计后再操作，勿直接重复调分。" : error.message;
+    }
+    throw error;
+  } finally {
+    state.riskActionBusy = false;
+    if (!state.unloaded) updateRiskActions();
+  }
 }
 
 async function loadCandidates() {
@@ -876,7 +1128,7 @@ async function loadTab(tabName) {
   if (tabName === "comment-reviews") return publishing.loadReviews("comment");
   if (tabName === "login") return loadLogin();
   if (tabName === "settings") return undefined;
-  if (tabName === "events") return loadEvents();
+  if (tabName === "events") return Promise.all([loadEvents(), loadRiskUsers()]);
   if (tabName === "feed") return loadCandidates();
   if (tabName === "storage") return loadStorage();
   if (tabName === "logs") {
@@ -948,6 +1200,70 @@ $("search-events").addEventListener("click", () => busy($("search-events"), asyn
   state.eventPage = 1;
   await loadEvents();
 }));
+for (const id of eventFilterIds) $(id).addEventListener("change", async () => {
+  nextRequest("events");
+  state.eventPage = 1;
+  state.eventId = "";
+  state.eventBack = null;
+  $("event-back").hidden = true;
+  if (id === "event-mode" && $(id).value === "uid" && !state.eventRangeInitialized) {
+    state.eventRangeInitialized = true;
+    if (!$("event-start").value && !$("event-end").value) {
+      const now = new Date();
+      const localInput = (date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      $("event-start").value = localInput(new Date(now.getTime() - 7 * 86400000));
+      $("event-end").value = localInput(now);
+    }
+  }
+  if (id === "event-profile") {
+    nextRequest("risk-users");
+    state.riskPage = 1;
+    closeRiskDetail();
+    $("risk-users").replaceChildren();
+  }
+  try { await Promise.all([loadEvents(), id === "event-profile" ? loadRiskUsers() : Promise.resolve()]); }
+  catch (error) { toast(error.message, "error"); }
+});
+$("event-back").addEventListener("click", () => busy($("event-back"), async () => {
+  if (!state.eventBack) return;
+  const previous = state.eventBack;
+  eventFilterIds.forEach((id, index) => { $(id).value = previous.values[index]; });
+  state.eventPage = previous.page;
+  state.eventId = "";
+  state.eventBack = null;
+  $("event-back").hidden = true;
+  closeRiskDetail();
+  await Promise.all([loadEvents(), loadRiskUsers()]);
+}));
+for (const id of ["risk-uid", "risk-level", "risk-manual"]) $(id).addEventListener("change", async () => {
+  state.riskPage = 1;
+  try { await loadRiskUsers(); } catch (error) { toast(error.message, "error"); }
+});
+$("search-risk").addEventListener("click", () => busy($("search-risk"), async () => {
+  state.riskPage = 1;
+  await loadRiskUsers();
+}));
+for (const [id, direction] of [["risk-prev", -1], ["risk-next", 1]]) {
+  $(id).addEventListener("click", () => busy($(id), async () => {
+    state.riskPage = Math.max(1, Math.min(state.riskPages, state.riskPage + direction));
+    await loadRiskUsers();
+  }));
+}
+$("close-risk").addEventListener("click", closeRiskDetail);
+for (const [id, direction] of [["refresh-risk", 0], ["risk-audit-prev", -1], ["risk-audit-next", 1]]) {
+  $(id).addEventListener("click", () => busy($(id), async () => {
+    if (!state.riskSelected || state.riskActionBusy) return;
+    const { profile_id, uid } = state.riskSelected;
+    const page = Math.max(1, Math.min(state.riskAuditPages, state.riskAuditPage + direction));
+    await loadRiskDetail(profile_id, uid, page);
+  }));
+}
+for (const action of ["block", "unblock", "adjust"]) {
+  $("risk-" + action).addEventListener("click", async () => {
+    try { await bridge.ready(); await changeRisk(action); }
+    catch (error) { toast(error.message, "error"); }
+  });
+}
 $("event-prev").addEventListener("click", () => busy($("event-prev"), async () => {
   state.eventPage = Math.max(1, state.eventPage - 1);
   await loadEvents();

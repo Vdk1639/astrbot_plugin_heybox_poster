@@ -466,6 +466,8 @@ def parse_notifications(
                 )
             ),
             observed_at=observed_at,
+            source_time_provided=bool(_first(content_obj, 'created_at', 'create_at', 'timestamp', 'time',
+                                            default=_first(raw, 'created_at', 'timestamp', 'time', default=''))),
             post_author_uid=(
                 _id(raw, "post_author_uid")
                 or _id(post_obj, "author_uid", "user_id", "userid", "uid")

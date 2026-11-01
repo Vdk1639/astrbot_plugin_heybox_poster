@@ -7,17 +7,27 @@ import shutil
 import sys
 import unittest
 import uuid
-from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+import httpx
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
+sys.path.insert(0, str(ROOT))
+from adapter_tests.astrbot_stubs import install
+
+install()
 
 from astrbot_plugin_heybox_poster.core.client import NetworkError, RateLimited
 from astrbot_plugin_heybox_poster.core.outbox import Outbox
 from astrbot_plugin_heybox_poster.core.publishing import PublishingService
 from astrbot_plugin_heybox_poster.xiaoheihe.config_service import DEFAULT_CONFIG, ConfigService, ConfigValidationError
-from astrbot_plugin_heybox_poster.xiaoheihe.models import Credentials, RoutingTarget, SendResult
+from astrbot_plugin_heybox_poster.xiaoheihe.models import Credentials, Notification, NotificationType, RoutingTarget, SendResult
 from astrbot_plugin_heybox_poster.xiaoheihe.runtime import RuntimeServices
+from astrbot_plugin_heybox_poster.xiaoheihe.api_client import XiaoheiheApiClient
+from astrbot_plugin_heybox_poster.xiaoheihe.adapter import XiaoheihePlatformAdapter
+from astrbot_plugin_heybox_poster.xiaoheihe.runtime import bind_runtime, unbind_runtime
 
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
@@ -128,7 +138,10 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             return client
         self.runtime.get_client = switch
         item = (await self.service.submit("comment", "default", dict(post_id="99", text="回复")))["review"]
-        self.assertEqual((await self.service.approve(item["id"]))["status"], "failed")
+        result = await self.service.approve(item["id"])
+        self.assertEqual(result["status"], "pending")
+        self.assertTrue(result["policy_blocked"])
+        self.assertEqual(result["reason"], "reply_account_changed")
         client.send_comment.assert_not_called()
 
     async def test_send_uncertainty_and_cancellation_never_allow_reapproval(self):
@@ -187,3 +200,356 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             config["publishing"][field] = "false"
             with self.assertRaises(ConfigValidationError):
                 ConfigService(config)
+
+    def comment_client(self, error=None):
+        client = Mock(credentials=self.credentials, send_comment=AsyncMock(return_value=SendResult("88", True)))
+        async def send(route, text, *, before_send):
+            await before_send()
+            if error:
+                raise error
+            return SendResult("88", True)
+        client.send_comment.side_effect = send
+        self.runtime.get_client = AsyncMock(return_value=client)
+        return client
+
+    async def test_comment_limit_is_shared_between_profiles_and_sources(self):
+        self.config["publishing"]["comment_daily_limit"] = 1
+        self.config["proactive_feed"]["dry_run"] = False
+        self.config["profiles"].append(dict(self.config["profiles"][0], profile_id="second"))
+        self.runtime.credentials.save(Credentials("second", "100", "同账号", self.credentials.cookies))
+        client = self.comment_client()
+        first = (await self.service.submit("comment", "default", dict(post_id="99", text="第一条")))["review"]
+        self.assertEqual((await self.service.approve(first["id"]))["status"], "sent")
+        second = (await self.service.submit_comment(RoutingTarget("second", "98"), "第二条", proactive=True))["review"]
+        result = await self.service.approve(second["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "comment_account_daily_limit"))
+        self.assertEqual(self.service.queue.get(second["id"])["status"], "pending")
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 1)
+        client.send_comment.assert_awaited_once()
+
+    async def test_concurrent_comment_approvals_cannot_take_last_slot_twice(self):
+        self.config["publishing"]["comment_daily_limit"] = 1
+        client = self.comment_client()
+        reviews = [(await self.service.submit("comment", "default", dict(post_id=post, text=post)))["review"] for post in ("98", "99")]
+        results = await asyncio.gather(*(self.service.approve(row["id"]) for row in reviews))
+        self.assertEqual(sorted(result["status"] for result in results), ["pending", "sent"])
+        client.send_comment.assert_awaited_once()
+
+    async def test_local_stop_after_reservation_releases_quota_and_own_cooldown(self):
+        self.config["publishing"]["cooldown_seconds"] = 60
+        client = self.comment_client()
+        row = (await self.service.submit("comment", "default", dict(post_id="99", text="回复")))["review"]
+        reserve = self.runtime.repository.reserve_comment_attempt
+        async def enable_simulation(*args, **kwargs):
+            result = await reserve(*args, **kwargs)
+            self.config["publishing"]["dry_run"] = True
+            return result
+        self.runtime.repository.reserve_comment_attempt = enable_simulation
+        result = await self.service.approve(row["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "reply_dry_run_changed"))
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 0)
+        self.assertEqual(self.outbox.cooldown_until("id:100:publishing"), 0)
+        client.send_comment.assert_not_called()
+        self.config["publishing"]["dry_run"] = False
+        self.runtime.repository.reserve_comment_attempt = reserve
+        self.assertEqual((await self.service.approve(row["id"]))["status"], "sent")
+        client.send_comment.assert_awaited_once()
+
+    async def test_cancel_during_final_local_check_is_pending_but_network_cancel_is_unknown(self):
+        client = self.comment_client()
+        row = (await self.service.submit("comment", "default", dict(post_id="99", text="回复")))["review"]
+        check = self.service.check_comment_policy
+        calls = 0
+        async def cancel_last_check(item):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise asyncio.CancelledError()
+            await check(item)
+        self.service.check_comment_policy = cancel_last_check
+        with self.assertRaises(asyncio.CancelledError):
+            await self.service.approve(row["id"])
+        self.assertEqual(self.service.queue.get(row["id"])["status"], "pending")
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 0)
+        client.send_comment.assert_not_called()
+        self.service.check_comment_policy = check
+        async def cancel_network(*args, before_send):
+            await before_send()
+            raise asyncio.CancelledError()
+        client.send_comment.side_effect = cancel_network
+        with self.assertRaises(asyncio.CancelledError):
+            await self.service.approve(row["id"])
+        self.assertEqual(self.service.queue.get(row["id"])["status"], "send_unknown")
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 1)
+
+    async def test_cancel_before_attempt_registration_returns_comment_to_pending(self):
+        self.runtime.get_client = AsyncMock(side_effect=asyncio.CancelledError())
+        row = (await self.service.submit("comment", "default", dict(post_id="99", text="回复")))["review"]
+        with self.assertRaises(asyncio.CancelledError):
+            await self.service.approve(row["id"])
+        self.assertEqual(self.service.queue.get(row["id"])["status"], "pending")
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 0)
+
+    async def shared_notification_review(self):
+        payload = dict(post_id="99", parent_comment_id="77", root_comment_id="77", text="同一回复")
+        events = []
+        for index in (1, 2):
+            notice = Notification(
+                profile_id="default", external_event_id=str(index), external_comment_id=str(index),
+                notification_id=str(index), event_type=NotificationType.MENTION,
+                sender_uid=str(200 + index), sender_nickname="用户", post_id="99",
+                root_comment_id=str(index), parent_comment_id=str(index), content="你好", created_at=1,
+            )
+            event_id = await self.runtime.repository.claim_event(notice)
+            await self.runtime.repository.reserve_reply_admission(
+                event_id, notice, account_id="100", thread_once=True, user_daily_limit=5,
+                account_daily_limit=30, owner_exempt=False,
+            )
+            context = await self.service._source_context("default", event_id)
+            row = self.service.queue.submit(
+                "comment", "default", "100", payload, source="notification",
+                source_id=str(event_id), source_context=context,
+            )
+            events.append(event_id)
+        await self.service.settle_sources(row)
+        return row, events
+
+    async def test_every_notification_source_is_checked_and_rejection_releases_all_floors(self):
+        client = self.comment_client()
+        row, events = await self.shared_notification_review()
+        self.assertEqual(len(self.service.queue.sources(row["id"])), 2)
+        self.config["permissions"]["user_blacklist"] = ["202"]
+        result = await self.service.approve(row["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "reply_policy_changed"))
+        client.send_comment.assert_not_called()
+        await self.service.reject(row["id"])
+        admissions = await self.runtime.repository.db.fetchall(
+            "SELECT floor_active,outcome FROM reply_admissions ORDER BY incoming_event_id",
+        )
+        self.assertEqual([(item["floor_active"], item["outcome"]) for item in admissions], [(0, "rejected"), (0, "rejected")])
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["processing_count"], 2)
+        for event_id in events:
+            event = await self.runtime.repository.db.fetchone("SELECT status FROM incoming_events WHERE id=?", (event_id,))
+            self.assertEqual(event["status"], "ignored")
+
+    async def test_reconcile_confirms_existing_send_and_all_notification_sources_once(self):
+        row, events = await self.shared_notification_review()
+        self.service.queue.claim(row["id"], profile_id="default", account_id="100")
+        self.service.queue.finish(row["id"], "send_unknown")
+        route = RoutingTarget("default", "99", "77", "77")
+        reservation = await self.runtime.repository.reserve_comment_attempt(
+            "default", events[0], route, "同一回复", account_id="100",
+            send_key=f"review:{row['id']}", daily_limit=30,
+        )
+        await self.runtime.repository.confirm_outgoing(reservation["id"], "88")
+        await self.runtime.repository.db.execute("UPDATE incoming_events SET status='send_unknown' WHERE id IN (?,?)", tuple(events))
+        await self.service.reconcile()
+        await self.service.reconcile()
+        self.assertEqual(self.service.queue.get(row["id"])["status"], "sent")
+        rows = await self.runtime.repository.db.fetchall("SELECT status FROM incoming_events WHERE id IN (?,?)", tuple(events))
+        self.assertEqual([item["status"] for item in rows], ["sent", "sent"])
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 1)
+
+    async def test_source_added_during_policy_check_requires_new_approval(self):
+        client = self.comment_client()
+        row, _ = await self.shared_notification_review()
+        original = self.runtime.repository.risk_user
+
+        async def attach_source(*args, **kwargs):
+            self.service.queue.submit(
+                "comment", "default", "100", row["payload"],
+                source="notification", source_id="9999", source_context={},
+            )
+            return await original(*args, **kwargs)
+
+        self.runtime.repository.risk_user = attach_source
+        result = await self.service.approve(row["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "reply_policy_changed"))
+        client.send_comment.assert_not_called()
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 0)
+
+    async def test_old_generation_callbacks_cannot_change_a_new_admission(self):
+        notice = Notification(
+            profile_id="default", external_event_id="1", external_comment_id="1",
+            notification_id="1", event_type=NotificationType.MENTION, sender_uid="201",
+            sender_nickname="用户", post_id="99", root_comment_id="77", parent_comment_id="77",
+            content="你好", created_at=1,
+        )
+        repo = self.runtime.repository
+        event_id = await repo.claim_event(notice)
+        kwargs = dict(account_id="100", thread_once=True, user_daily_limit=5, account_daily_limit=30, owner_exempt=False)
+        first = await repo.reserve_reply_admission(event_id, notice, **kwargs)
+        await repo.schedule_retry(event_id, "上下文暂不可用", max_retries=3)
+        await repo.db.execute("UPDATE incoming_events SET next_retry_at=0 WHERE id=?", (event_id,))
+        self.assertEqual(await repo.claim_retry_event(notice), event_id)
+        second = await repo.reserve_reply_admission(event_id, notice, **kwargs)
+        self.assertTrue(second["created"])
+        await self.runtime.fail_reply(event_id=event_id, route=notice.route, error="旧回调", generated_ms=1, admission_id=first["id"])
+        await self.runtime.expire_reply(event_id=event_id, route=notice.route, generated_ms=1000, reply_timeout_seconds=1, admission_id=first["id"])
+        with self.assertRaisesRegex(ValueError, "尝试已变更"):
+            await self.runtime.deliver(event_id=event_id, route=notice.route, content="旧回复", dry_run=False, admission_id=first["id"])
+        row = await repo.db.fetchone("SELECT status FROM incoming_events WHERE id=?", (event_id,))
+        admission = await repo.db.fetchone("SELECT outcome,floor_active FROM reply_admissions WHERE id=?", (second["id"],))
+        self.assertEqual((row["status"], admission["outcome"], admission["floor_active"]), ("claimed", "processing", 1))
+        self.assertFalse(self.service.queue.list())
+
+    async def test_manual_user_status_is_rechecked_for_all_sources_after_body_cleanup(self):
+        client = self.comment_client()
+        row, events = await self.shared_notification_review()
+        await self.runtime.repository.db.execute(
+            "UPDATE incoming_events SET content=NULL,raw_json=NULL WHERE id IN (?,?)", tuple(events),
+        )
+        await self.runtime.repository.manage_risk_user(
+            "default", "202", action="block", note="人工暂停", operator="admin",
+            risk_config=self.config["risk"],
+        )
+        self.config["risk"]["enabled"] = False
+        result = await self.service.approve(row["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "risk_manual_blocked"))
+        self.assertIn("user_filter:default:202", self.runtime._alerts)
+        client.send_comment.assert_not_called()
+        await self.runtime.repository.manage_risk_user(
+            "default", "202", action="unblock", note="恢复", operator="admin",
+            risk_config=self.config["risk"],
+        )
+        self.assertEqual((await self.service.approve(row["id"]))["status"], "sent")
+        self.assertNotIn("user_filter:default:202", self.runtime._alerts)
+        client.send_comment.assert_awaited_once()
+
+    def test_user_filter_alerts_log_only_changes(self):
+        emit = self.runtime.logging.emit = Mock()
+        self.runtime.record_user_filter("default", "201", "risk_manual_blocked")
+        self.runtime.record_user_filter("default", "201", "risk_manual_blocked")
+        self.assertEqual(emit.call_count, 1)
+        self.runtime.record_user_filter("default", "201", "")
+        self.runtime.record_user_filter("default", "201", "")
+        self.assertEqual(emit.call_count, 2)
+        self.assertNotIn("user_filter:default:201", self.runtime._alerts)
+
+    async def test_missing_source_is_pending_while_verified_link_without_uid_can_send(self):
+        client = self.comment_client()
+        missing = (await self.service.submit_comment(RoutingTarget("default", "99"), "回复", event_id=42))["review"]
+        result = await self.service.approve(missing["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "risk_source_unresolved"))
+        client.send_comment.assert_not_called()
+        notice = Notification(
+            profile_id="default", external_event_id="2", external_comment_id="2",
+            notification_id="2", event_type=NotificationType.MENTION, sender_uid="",
+            sender_nickname="未知用户", post_id="98", root_comment_id="77", parent_comment_id="77",
+            content="你好", created_at=1,
+        )
+        event_id = await self.runtime.repository.claim_event(notice)
+        await self.runtime.repository.reserve_reply_admission(
+            event_id, notice, account_id="100", thread_once=True, user_daily_limit=5,
+            account_daily_limit=30, owner_exempt=False,
+        )
+        item = (await self.service.submit_comment(notice.route, "回复", event_id=event_id))["review"]
+        self.assertEqual((await self.service.approve(item["id"]))["status"], "sent")
+        client.send_comment.assert_awaited_once()
+
+    async def test_final_check_runs_after_client_rate_wait_before_any_http_write(self):
+        requests = []
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: requests.append(request) or httpx.Response(200, json={"status": "ok", "commentid": "88"}),
+        ), base_url="https://api.xiaoheihe.cn")
+        self.addAsyncCleanup(http_client.aclose)
+        client = XiaoheiheApiClient("default", credentials=self.credentials, client=http_client)
+        self.runtime.get_client = AsyncMock(return_value=client)
+        self.config["publishing"]["cooldown_seconds"] = 60
+        row = (await self.service.submit("comment", "default", dict(post_id="99", text="回复")))["review"]
+        async def change_to_simulation():
+            self.config["publishing"]["dry_run"] = True
+        client._limiter = SimpleNamespace(wait=change_to_simulation)
+        result = await self.service.approve(row["id"])
+        self.assertEqual((result["status"], result["reason"]), ("pending", "reply_dry_run_changed"))
+        self.assertEqual(requests, [])
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 0)
+        self.assertEqual(self.outbox.cooldown_until("id:100:publishing"), 0)
+        self.config["publishing"]["dry_run"] = False
+        async def cancel_rate_wait():
+            raise asyncio.CancelledError()
+        client._limiter = SimpleNamespace(wait=cancel_rate_wait)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.service.approve(row["id"])
+        self.assertEqual(self.service.queue.get(row["id"])["status"], "pending")
+        self.assertEqual(requests, [])
+        self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 0)
+        client._limiter = SimpleNamespace(wait=AsyncMock())
+        self.assertEqual((await self.service.approve(row["id"]))["status"], "sent")
+        self.assertEqual(len(requests), 1)
+
+    async def test_proactive_context_cannot_rebind_when_account_changes(self):
+        bind_runtime(self.runtime)
+        self.addCleanup(unbind_runtime, self.runtime)
+        adapter = XiaoheihePlatformAdapter({"id": "test", "profile_id": "default"}, {}, asyncio.Queue())
+        self.comment_client()
+        async def switch_account(*args):
+            self.runtime.credentials.save(Credentials("default", "200", "新账号", self.credentials.cookies))
+            return Mock()
+        adapter._context_builder = Mock(build=AsyncMock(side_effect=switch_account))
+        adapter.commit_event = Mock()
+        notice = Notification(
+            profile_id="default", external_event_id="feed:99", external_comment_id="feed:99",
+            notification_id="feed:99", event_type=NotificationType.PROACTIVE_FEED,
+            sender_uid="201", sender_nickname="作者", post_id="99", root_comment_id="",
+            parent_comment_id="", content="帖子", created_at=1,
+        )
+        with self.assertRaisesRegex(RuntimeError, "账号已切换"):
+            await adapter._dispatch_synthetic(notice, {})
+        row = await self.runtime.repository.db.fetchone("SELECT reply_account_id FROM incoming_events WHERE external_event_id='feed:99'")
+        self.assertEqual(row["reply_account_id"], "100")
+        adapter.commit_event.assert_not_called()
+        self.assertFalse(self.service.queue.list())
+
+    async def test_utc_day_change_during_final_policy_check_keeps_pending_without_http(self):
+        requests = []
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: requests.append(request) or httpx.Response(200, json={"status": "ok", "commentid": "88"}),
+        ), base_url="https://api.xiaoheihe.cn")
+        self.addAsyncCleanup(http_client.aclose)
+        client = XiaoheiheApiClient("default", credentials=self.credentials, client=http_client)
+        client._limiter = SimpleNamespace(wait=AsyncMock())
+        self.runtime.get_client = AsyncMock(return_value=client)
+        self.config["publishing"].update(comment_daily_limit=1, cooldown_seconds=60)
+        row = (await self.service.submit("comment", "default", dict(post_id="99", text="回复")))["review"]
+        current_time = 1793491199.0
+        clock = SimpleNamespace(time=lambda: current_time)
+        original = self.service.check_comment_policy
+        checks = 0
+
+        async def cross_midnight(review):
+            nonlocal current_time, checks
+            await original(review)
+            checks += 1
+            if checks == 4:
+                current_time += 1
+                # Another operation consumes today's last slot while this check awaits.
+                await self.runtime.repository.reserve_comment_attempt(
+                    "default", None, RoutingTarget("default", "98"), "其他回复",
+                    account_id="100", send_key="other-review", daily_limit=1,
+                )
+
+        self.service.check_comment_policy = cross_midnight
+        with patch("astrbot_plugin_heybox_poster.xiaoheihe.runtime.time", clock), patch(
+            "astrbot_plugin_heybox_poster.xiaoheihe.repository.time", clock,
+        ):
+            result = await self.service.approve(row["id"])
+            self.assertEqual((result["status"], result["reason"]), ("pending", "reply_policy_changed"))
+            self.assertEqual(requests, [])
+            self.assertEqual((await self.runtime.repository.reply_budget_status("100"))["comment_count"], 1)
+            outgoing = await self.runtime.repository.db.fetchone(
+                "SELECT status FROM outgoing_replies WHERE send_key=?", (f"review:{row['id']}",),
+            )
+            self.assertEqual(outgoing["status"], "retry_wait")
+            self.assertEqual(self.outbox.cooldown_until("id:100:publishing"), 0)
+
+    async def test_successful_review_history_cannot_restore_expired_floor(self):
+        row, events = await self.shared_notification_review()
+        self.comment_client()
+        self.assertEqual((await self.service.approve(row["id"]))["status"], "sent")
+        complete = await self.runtime.repository.db.fetchall("SELECT completed_at FROM incoming_events")
+        self.assertTrue(all(item["completed_at"] is not None for item in complete))
+        await self.runtime.repository.db.execute("UPDATE incoming_events SET completed_at=1")
+        await self.runtime.repository.db.execute("DELETE FROM reply_admissions")
+        await self.service.reconcile()
+        self.assertEqual((await self.runtime.repository.table_counts())["reply_admissions"], 0)

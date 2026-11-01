@@ -378,7 +378,9 @@ class FakeSendingClient:
         self.comments = []
         self.send_calls = 0
 
-    async def send_comment(self, route, content):
+    async def send_comment(self, route, content, *, before_send=None):
+        if before_send is not None:
+            await before_send()
         self.send_calls += 1
         if self.error:
             raise self.error

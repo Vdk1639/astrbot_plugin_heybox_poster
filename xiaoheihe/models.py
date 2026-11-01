@@ -151,6 +151,8 @@ class Notification:
     explicit_wake: bool = True
     image_urls: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    source_time_provided: bool = False
+    is_backfill: bool = False
 
     @property
     def route(self) -> RoutingTarget:

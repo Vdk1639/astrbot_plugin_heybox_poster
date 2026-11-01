@@ -108,11 +108,13 @@ async def test_database_upgrades_v2_to_latest(tmp_path) -> None:
 async def test_database_upgrades_v9_visual_records_with_unknown_owner(tmp_path) -> None:
     path = tmp_path / "upgrade-v9.db"
     connection = await aiosqlite.connect(path)
-    for _version, script in MIGRATIONS[:-1]:
+    for _version, script in MIGRATIONS:
+        if _version >= 10:
+            break
         await connection.executescript(script)
     await connection.executemany(
         "INSERT INTO schema_migrations(version) VALUES (?)",
-        [(version,) for version, _script in MIGRATIONS[:-1]],
+        [(version,) for version, _script in MIGRATIONS if version < 10],
     )
     await connection.execute(
         """
@@ -130,7 +132,7 @@ async def test_database_upgrades_v9_visual_records_with_unknown_owner(tmp_path) 
 
     database = Database(path)
     await database.open()
-    assert await database.schema_version() == 10
+    assert await database.schema_version() == MIGRATIONS[-1][0]
     record = await database.fetchone(
         "SELECT owner_uid, owner_nickname, owner_role FROM visual_contexts WHERE post_id = ?",
         ("post-old",),

@@ -275,6 +275,8 @@ class XiaoheihePlatformAdapter(Platform):
             permissions,
             self._context_builder,
             self._dispatch,
+            credential_loader=runtime.credentials.load,
+            risk_state_callback=runtime.record_user_filter,
         )
         await runtime.tasks.start_profile_poller(profile_id, self._service.run())
         proactive_config = config["proactive_feed"]
@@ -349,6 +351,13 @@ class XiaoheihePlatformAdapter(Platform):
         credentials = client.credentials
         if credentials is None:
             raise RuntimeError("分发事件时账号凭证不存在")
+        bound_account = await runtime.repository.admission_account_id(event_id)
+        admission = await runtime.repository.db.fetchone(
+            "SELECT id FROM reply_admissions WHERE incoming_event_id=? ORDER BY attempt_no DESC LIMIT 1", (event_id,),
+        )
+        current = runtime.credentials.load(notification.profile_id)
+        if bound_account and (credentials.uid != bound_account or current is None or current.uid != bound_account):
+            raise RuntimeError("通知准入后账号已切换，已停止旧账号任务")
         message = AstrBotMessage()
         message.type = MessageType.GROUP_MESSAGE
         message.self_id = credentials.uid
@@ -435,6 +444,7 @@ class XiaoheihePlatformAdapter(Platform):
             runtime=runtime,
             route=notification.route,
             event_id=event_id,
+            admission_id=admission["id"] if admission else None,
             dry_run=dry_run,
             proactive=proactive,
             capture_candidate=capture_candidate,
@@ -481,6 +491,16 @@ class XiaoheihePlatformAdapter(Platform):
         if event_id is None:
             return
         client = await runtime.get_client(notification.profile_id)
+        account_id = str(getattr(client.credentials, "uid", "") or "")
+        current = runtime.credentials.load(notification.profile_id)
+        if not account_id or current is None or current.uid != account_id:
+            raise RuntimeError("主动任务账号不可用，已停止处理")
+        await runtime.repository.db.execute(
+            "UPDATE incoming_events SET reply_account_id=? WHERE id=? AND reply_account_id=''",
+            (account_id, event_id),
+        )
+        if await runtime.repository.admission_account_id(event_id) != account_id:
+            raise RuntimeError("主动任务账号绑定不一致，已停止处理")
         context = await self._context_builder.build(notification, client)
         await runtime.repository.mark_event(event_id, EventState.CONTEXT_READY)
         await runtime.repository.record_session(notification.route)

@@ -3,6 +3,13 @@
     "type": "object",
     "description": "发布与审核",
     "items": {
+      "comment_daily_limit": {
+        "description": "每账号真实评论日上限；全部来源共用，发送中/成功/未知均占用；0 不限，UTC 0 点（北京时间 08:00）重置",
+        "type": "int",
+        "default": 30,
+        "min": 0,
+        "max": 100000
+      },
       "default_topic_ids": {
         "description": "默认社区/话题 ID，多个用英文逗号分隔；发帖时没指定话题就用它",
         "type": "string",
@@ -299,6 +306,30 @@
     "type": "object",
     "description": "回复策略",
     "items": {
+      "reply_thread_once": {
+        "description": "同一楼层只接受一次通知回复；待审及发送未知继续占位，可能限制正常追问",
+        "type": "bool",
+        "default": true
+      },
+      "reply_daily_per_user": {
+        "description": "每账号每用户每日通知处理次数；0 不限，失败/模拟/审核拒绝不退，缺 UID 共用一个桶",
+        "type": "int",
+        "default": 5,
+        "min": 0,
+        "max": 100000
+      },
+      "reply_daily_total": {
+        "description": "同 UID 多档案共享每日通知处理总次数；0 不限，北京时间 08:00 重置，上下文读取失败也计次，不等于模型调用或 Token 配额",
+        "type": "int",
+        "default": 30,
+        "min": 0,
+        "max": 100000
+      },
+      "reply_owner_exempt": {
+        "description": "可信主人 UID 仅豁免单用户处理上限；楼层、账号总预算、发送限额和审核仍生效",
+        "type": "bool",
+        "default": true
+      },
       "dry_run_mark_processed": {
         "description": "模拟运行后标记完成",
         "type": "bool",
@@ -334,6 +365,23 @@
         "type": "bool",
         "default": true
       }
+    }
+  },
+  "risk": {
+    "type": "object",
+    "description": "用户风险（启发式判断，默认只观察；人工封禁独立生效）",
+    "items": {
+      "enabled": {"description": "评估并累积新事件风险；关闭不解除人工封禁，也不补评积压历史", "type": "bool", "default": true},
+      "auto_filter_enabled": {"description": "按阈值自动过滤；默认关闭，先观察误判再显式开启", "type": "bool", "default": false},
+      "watch_score": {"description": "观察等级起点，必须低于自动过滤阈值", "type": "int", "default": 20, "min": 1, "max": 999},
+      "auto_filter_score": {"description": "自动过滤阈值；达到阈值不表示已开启过滤", "type": "int", "default": 60, "min": 2, "max": 1000},
+      "flood_window_minutes": {"description": "行为计数及同规则去重窗口（分钟）", "type": "int", "default": 10, "min": 1, "max": 1440},
+      "flood_threshold": {"description": "窗口内通知数阈值，包含当前事件；历史回填/时间不明不计短时风险", "type": "int", "default": 8, "min": 2, "max": 1000},
+      "burst_score": {"description": "短时高频加分；0 关闭此规则", "type": "int", "default": 20, "min": 0, "max": 1000},
+      "repeat_score": {"description": "连续重复内容加分；0 关闭此规则", "type": "int", "default": 15, "min": 0, "max": 1000},
+      "injection_score": {"description": "明确指令覆盖/权限伪装加分；0 关闭此规则，普通技术讨论不直接计分", "type": "int", "default": 25, "min": 0, "max": 1000},
+      "privacy_score": {"description": "明确索取非公开信息加分；0 关闭此规则", "type": "int", "default": 30, "min": 0, "max": 1000},
+      "owner_exempt": {"description": "可信主人免自动评分/过滤；人工封禁和原有硬黑名单仍生效", "type": "bool", "default": true}
     }
   },
   "permissions": {

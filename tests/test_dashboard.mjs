@@ -112,11 +112,18 @@ const config = {
   profiles: [{ profile_id: "default", display_name: "默认账号" }, { profile_id: "second", display_name: "第二账号" }],
   publishing: { profile_id: "second", dry_run: true, post_review_required: true, comment_review_required: true, default_topic_ids: "42", view_limit: 2 },
   proactive_feed: { dry_run: true, topic_ids: [], fallback_sources: ["all"] },
+  reply: { reply_thread_once: true, reply_daily_per_user: 5, reply_daily_total: 30, reply_owner_exempt: true },
+  risk: { enabled: true, auto_filter_enabled: false, watch_score: 20, auto_filter_score: 60, flood_window_minutes: 10, flood_threshold: 8, burst_score: 20, repeat_score: 15, injection_score: 25, privacy_score: 30, owner_exempt: true },
 };
+config.publishing.comment_daily_limit = 30;
+const actualSchema = JSON.parse(readFileSync(new URL("../_conf_schema.json", import.meta.url), "utf8"));
 const schema = {
   profiles: { type: "template_list", templates: { profile: { items: { profile_id: { type: "string", default: "default" }, display_name: { type: "string", default: "账号" } } } } },
   publishing: { type: "object", description: "发布管理", items: { profile_id: { type: "string", default: "default" }, dry_run: { type: "bool", default: true }, post_review_required: { type: "bool", default: true }, comment_review_required: { type: "bool", default: true } } },
 };
+schema.reply = actualSchema.reply;
+schema.risk = actualSchema.risk;
+schema.publishing.items.comment_daily_limit = actualSchema.publishing.items.comment_daily_limit;
 function review(kind, status = "pending", id = 1) {
   return { id, kind, profile_id: "second", account_id: "uid-2", payload: { title: "<img src=x onerror=alert(1)>", text: "<script>unsafe()</script>", post_id: "post-42", parent_comment_id: "parent-4", root_comment_id: "root-2", topic_ids: ["42"], mode: "dynamic", view_limit: 2 }, source: "proactive", status, created_at: 1700000000 };
 }
@@ -130,10 +137,12 @@ async function page(options = {}) {
     if (mock.get) { const value = await mock.get(path, query); if (value !== undefined) return value; }
     if (path === "config" || path === "config/defaults") return plain(config);
     if (path === "config/schema") return plain(schema);
-    if (path === "status") return { version: "v0.7.1", profiles: [], tasks: [], adapters: [], alerts: [] };
+    if (path === "status") return { version: "v0.8.0", profiles: [], tasks: [], adapters: [], alerts: [] };
     if (path === "publishing/status") return { profile_id: "second", has_credentials: true, uid: "uid-2", dry_run: true, post_review_required: true, comment_review_required: true, counts: { pending: 2 } };
     if (path === "auth/status") return { profile_id: query.profile_id, state: "logged_in", nickname: query.profile_id, uid: query.profile_id };
     if (path === "events") return { page: 1, page_size: 50, total: 0, items: [] };
+    if (path === "risk/users") return { page: 1, page_size: 30, total: 0, items: [] };
+    if (path === "risk/users/detail") return { user: { profile_id: query.profile_id, sender_uid: query.uid, score: 0, level: "normal", manual_blocked: false, auto_filtered: false }, events: { page: query.page, page_size: 30, total: 0, items: [] } };
     if (path === "storage") return { counts: {} };
     if (path === "feed/topics/probe") return { topics: [{ id: "1", name: "数码", group: "技术" }], topic_count: 1, feed_verified: true, verified_topic_id: "1" };
     return { items: [] };
@@ -151,7 +160,7 @@ async function page(options = {}) {
     addEventListener: (name, fn) => (events[name] ||= []).push(fn),
     location: { reload: () => { mock.reloaded = true; } },
   };
-  const context = vm.createContext({ window, document, navigator: {}, console, structuredClone, queueMicrotask,
+  const context = vm.createContext({ window, document, Node: Element, navigator: {}, console, structuredClone, queueMicrotask,
     setTimeout: (fn) => schedule(fn), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn) => schedule(fn, true), clearInterval: (id) => timers.delete(id),
     requestAnimationFrame: (fn) => schedule(fn), cancelAnimationFrame: (id) => timers.delete(id),
@@ -159,7 +168,7 @@ async function page(options = {}) {
   const load = (name, returned) => vm.runInContext(`(() => { ${sources[name].replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn ${returned}; })()`, context, { filename: name });
   context.bridge = load("bridge.js", "bridge");
   context.createPublishing = load("publishing.js", "createPublishing");
-  const app = load("app.js", "({loadStatus, loadConfig, loadLogin, loadEvents, loadCandidates, loadLogs, loadStorage, loadTab, state, publishing, renderLogin})");
+  const app = load("app.js", "({loadStatus, loadConfig, loadLogin, loadEvents, loadRiskUsers, loadRiskDetail, loadCandidates, loadLogs, loadStorage, loadTab, state, publishing, renderLogin})");
   const topics = load("topic_probe.js", "({loadSources, probeTopics, saveTopicSelection, saveFallbackSources})");
   await flush();
   const $ = (id) => document.getElementById(id);
@@ -388,7 +397,7 @@ await test("event filters, logs, diagnostics and storage keep adapter API contra
   };
   p.$("event-uid").value = "123"; p.$("event-post").value = "target"; p.$("event-keyword").value = "query";
   await p.trigger("search-events");
-  assert.deepEqual(p.calls.find((call) => call.path === "events").query, { status: "", uid: "123", post_id: "target", keyword: "query", start_time: "", end_time: "", page: 1, page_size: 50 });
+  assert.deepEqual(p.calls.find((call) => call.path === "events").query, { group_by: "", profile_id: "", event_id: "", status: "", uid: "123", post_id: "target", keyword: "query", start_time: "", end_time: "", page: 1, page_size: 50 });
   assert.match(p.$("event-table").textContent, /<img onerror=bad\(\)>/); assert.equal(p.$("event-table").querySelectorAll("img").length, 0);
   await p.trigger("search-logs"); assert.match(p.$("log-output").textContent, /日志内容/);
   await p.trigger("copy-diagnostics"); assert.match(p.$("diagnostics-output").value, /sanitized/); assert(!p.$("diagnostics-fallback").hidden);
@@ -442,6 +451,264 @@ await test("pagehide cleans timers, SSE and confirmations, rejects late data and
   assert.equal(p.timers.size, 0); assert(p.unsubscribed.includes("subscription-1")); assert(p.$("confirm-overlay").hidden);
   const callCount = p.calls.length; await p.trigger("check-login"); assert.equal(p.calls.length, callCount);
   p.lifecycle("pageshow", { persisted: true }); assert(p.mock.reloaded);
+});
+
+await test("guard settings retain strict numeric values and observation defaults", async () => {
+  const p = await page();
+  assert.match(p.$("config-form").textContent, /默认只观察/);
+  const limit = p.$("config-form").querySelector('input[data-config-key="comment_daily_limit"]');
+  assert.equal(limit.min, "0"); assert.equal(limit.max, "100000");
+  for (const invalid of ["1.5", "-1", "100001", "", "5oops"]) {
+    limit.value = invalid; await limit.emit("input");
+    await p.trigger("save-config"); assert.equal(p.posts().length, 0);
+  }
+  limit.value = "0"; await limit.emit("input");
+  p.mock.post = () => ({ changed: ["publishing"] });
+  await p.trigger("save-config");
+  assert.equal(p.posts()[0].body.publishing.comment_daily_limit, 0);
+  assert.equal(p.posts()[0].body.risk.enabled, true);
+  assert.equal(p.posts()[0].body.risk.auto_filter_enabled, false);
+  assert.equal(p.posts()[0].body.reply.reply_daily_per_user, 5);
+});
+
+await test("per-profile budgets distinguish processing, real comments, shared anonymous quota and reset", async () => {
+  const p = await page();
+  p.mock.get = (path) => path === "status" ? { profiles: [
+    { profile_id: "default", reply_budget: { processing_count: 7, processing_limit: 30, comment_count: 2, comment_limit: 0, reset_local_time: "08:00", unverified_shared: true } },
+    { profile_id: "second", reply_budget: { processing_count: 7, processing_limit: 30, comment_count: 2, comment_limit: 0, reset_local_time: "08:00", unverified_shared: true } },
+    { profile_id: "legacy" },
+  ] } : undefined;
+  await p.app.loadStatus();
+  const text = p.$("reply-budgets").textContent;
+  assert.match(text, /default.*今日通知处理7 [/] 30/); assert.match(text, /second.*今日真实评论2 [/] 不限/);
+  assert.match(text, /08:00.*共用预算桶/); assert.match(text, /legacy.*未提供/);
+});
+
+function group(overrides = {}) {
+  return { profile_id: "default", sender_uid: "123", sender_nickname: "<img onerror=bad()>", identity_verified: true, event_count: 4, post_count: 2,
+    status_counts: { sent: 1, ignored: 3 }, event_type_counts: { mention: 3, proactive_feed: 1 },
+    last_event_at: 1700000000, last_discovered_at: 1699999900, risk_score: 60, risk_level: "blocked", manual_blocked: false, auto_filtered: false, ...overrides };
+}
+function riskDetail(query, user = {}, events = {}) {
+  return { user: { profile_id: query.profile_id, sender_uid: query.uid, score: 60, level: "blocked", auto_filtered: false, manual_blocked: false, note: "<script>note</script>", ...user },
+    events: { page: query.page, page_size: 30, total: 31, items: [{ created_at: 1700000000, rule: "adjust", delta: -5, before_score: 65, after_score: 60, operator: "<admin>", details: { note: "<img src=x>" } }], ...events } };
+}
+const lastCall = (p, path) => p.calls.filter((call) => call.path === path).at(-1);
+
+await test("group view explicitly sets seven days, drills verified or anonymous identities and restores filters and page", async () => {
+  const p = await page();
+  await p.tab("events");
+  assert.equal(lastCall(p, "events").query.start_time, "");
+  p.mock.get = (path, query) => path === "events" ? { page: query.page, page_size: 50, total: query.group_by ? 80 : 1, items: query.group_by
+    ? [group(), group({ sender_uid: "", identity_verified: false, event_id: 91, risk_score: null })]
+    : [{ profile_id: query.profile_id, content: "single event" }] } : undefined;
+  p.$("event-mode").value = "uid"; await p.trigger("event-mode", "change");
+  const range = lastCall(p, "events").query;
+  assert.equal(range.group_by, "uid"); assert.equal(range.end_time - range.start_time, 7 * 86400);
+  assert(Math.abs(range.end_time - Date.now() / 1000) < 65);
+  assert.match(p.$("event-range-hint").textContent, /至.*浏览器本地时间/);
+  assert.match(p.$("event-page").textContent, /80 组用户记录/);
+  assert.match(p.$("event-table").textContent, /主动 AI 回复 1/);
+  assert.match(p.$("event-table").textContent, /已达阈值，自动过滤未生效/);
+  assert.match(p.$("event-table").textContent, /不能可靠归属/);
+  assert.equal(p.$("event-table").querySelectorAll("img").length, 0);
+  await p.trigger("event-next"); assert.equal(lastCall(p, "events").query.page, 2);
+  let buttons = p.$("event-table").querySelectorAll("button");
+  assert(buttons[3].disabled);
+  await buttons[2].emit("click");
+  let drill = lastCall(p, "events").query;
+  assert.equal(drill.event_id, 91); assert.equal(drill.uid, ""); assert.equal(drill.profile_id, "default");
+  assert.equal(drill.start_time, range.start_time); assert.equal(drill.end_time, range.end_time);
+  await p.trigger("event-back");
+  assert.equal(p.$("event-mode").value, "uid"); assert.equal(lastCall(p, "events").query.page, 2);
+  buttons = p.$("event-table").querySelectorAll("button"); await buttons[0].emit("click");
+  drill = lastCall(p, "events").query;
+  assert.equal(drill.uid, "123"); assert.equal(drill.event_id, ""); assert.equal(drill.profile_id, "default");
+  await p.trigger("event-back");
+  p.$("event-start").value = ""; p.$("event-end").value = ""; await p.trigger("event-start", "change");
+  p.$("event-mode").value = ""; await p.trigger("event-mode", "change");
+  p.$("event-mode").value = "uid"; await p.trigger("event-mode", "change");
+  assert.equal(lastCall(p, "events").query.start_time, "");
+});
+
+await test("existing time ranges survive first aggregation and filter changes reset pagination", async () => {
+  const p = await page(); p.$("event-start").value = "2026-10-01T12:30";
+  p.$("event-end").value = "2026-10-02T12:30";
+  p.$("event-mode").value = "uid"; await p.trigger("event-mode", "change");
+  assert.equal(p.$("event-start").value, "2026-10-01T12:30");
+  p.app.state.eventPage = 9; p.$("event-status").value = "ignored"; await p.trigger("event-status", "change");
+  assert.equal(lastCall(p, "events").query.page, 1);
+  assert.equal(lastCall(p, "events").query.status, "ignored");
+});
+
+await test("risk list uses shared profile and typed filters, details paginate and history stays read only", async () => {
+  const p = await page();
+  p.mock.get = (path, query) => path === "risk/users" ? { page: query.page, page_size: 30, total: 31, items: [group()] }
+    : path === "risk/users/detail" ? riskDetail(query) : undefined;
+  p.$("event-profile").value = "default"; p.$("risk-uid").value = "123";
+  p.$("risk-level").value = "blocked"; p.$("risk-manual").value = "false";
+  await p.trigger("search-risk");
+  assert.deepEqual(lastCall(p, "risk/users").query, { profile_id: "default", uid: "123", level: "blocked", manual_blocked: "false", page: 1, page_size: 30 });
+  await p.trigger("risk-next"); assert.equal(lastCall(p, "risk/users").query.page, 2);
+  await p.$("risk-users").querySelectorAll("button")[1].emit("click");
+  assert(!p.$("risk-detail").hidden); assert.match(p.$("risk-facts").textContent, /自动过滤开关关闭/);
+  assert.match(p.$("risk-note").textContent, /<script>note<[/]script>/);
+  assert.equal(p.$("risk-detail").querySelectorAll("script, img").length, 0);
+  assert.match(p.$("risk-audit").textContent, /65 → 60/);
+  p.app.state.config.risk.auto_filter_enabled = true;
+  await p.app.loadRiskDetail("default", "123");
+  assert.match(p.$("risk-facts").textContent, /自动过滤开关关闭/);
+  await p.trigger("risk-audit-next"); assert.equal(lastCall(p, "risk/users/detail").query.page, 2);
+  await p.trigger("risk-audit-prev"); assert.equal(lastCall(p, "risk/users/detail").query.page, 1);
+  await p.app.loadRiskDetail("deleted-profile", "123");
+  assert.match(p.$("risk-result").textContent, /历史档案仅供查看/); assert(p.$("risk-block").disabled);
+  await p.trigger("risk-block"); assert.equal(p.posts().length, 0);
+});
+
+await test("risk operations capture confirmation, prevent double adjustment and preserve independent filtering", async () => {
+  const p = await page(); let blocked = false, score = 60, auto = true;
+  p.mock.get = (path, query) => path === "risk/users/detail" ? riskDetail(query, { manual_blocked: blocked, score, auto_filtered: auto }) : undefined;
+  p.mock.post = (path, body) => { if (!path.startsWith("risk/")) return;
+    if (path.endsWith("/block")) blocked = true;
+    if (path.endsWith("/unblock")) { blocked = false; if (body.reset_score) { score = 0; auto = false; } }
+    if (path.endsWith("/adjust")) score += body.delta;
+    return { user: { manual_blocked: blocked, score } };
+  };
+  await p.app.loadRiskDetail("default", "123");
+  p.$("risk-operation-note").value = "人工核查";
+  let operation = p.$("risk-block").emit("click"); await flush();
+  assert.match(p.$("confirm-message").textContent, /default.*123/); assert.match(p.$("confirm-message").textContent, /人工核查/);
+  await p.trigger("confirm-cancel"); await operation; assert.equal(p.posts().length, 0); assert(!p.$("risk-block").disabled);
+  operation = p.$("risk-block").emit("click"); await flush(); await p.trigger("confirm-accept"); await operation;
+  assert.deepEqual(p.posts()[0].body, { profile_id: "default", uid: "123", note: "人工核查", confirm: true });
+  operation = p.$("risk-unblock").emit("click"); await flush(); await p.trigger("confirm-accept"); await operation;
+  assert.equal(p.posts()[1].body.reset_score, false); assert.match(p.$("risk-result").textContent, /风险阈值仍阻止/);
+  p.$("risk-reset").checked = true;
+  operation = p.$("risk-unblock").emit("click"); await flush();
+  assert.match(p.$("confirm-message").textContent, /清零分数：是/); await p.trigger("confirm-accept"); await operation;
+  assert.equal(p.posts()[2].body.reset_score, true); assert.match(p.$("risk-facts").textContent, /0 分/);
+  p.$("risk-delta").value = "-1.2"; await p.trigger("risk-adjust"); assert.equal(p.posts().length, 3);
+  p.$("risk-operation-note").value = "x".repeat(201); await p.trigger("risk-block"); assert.equal(p.posts().length, 3);
+  p.$("risk-operation-note").value = "调分备注"; p.$("risk-delta").value = "-5";
+  operation = p.$("risk-adjust").emit("click"); await flush();
+  p.$("risk-delta").value = "100"; await p.trigger("risk-adjust"); await p.trigger("confirm-accept"); await operation;
+  assert.deepEqual(p.posts()[3].body, { profile_id: "default", uid: "123", note: "调分备注", confirm: true, delta: -5 });
+  assert.equal(p.posts().length, 4);
+});
+
+await test("failed risk adjustment stays locked until an explicit audit refresh and never retries automatically", async () => {
+  const p = await page(); await p.app.loadRiskDetail("default", "123");
+  p.mock.post = () => { throw new Error("lost response"); };
+  p.$("risk-delta").value = "5";
+  const operation = p.$("risk-adjust").emit("click"); await flush(); await p.trigger("confirm-accept"); await operation;
+  assert.equal(p.posts().length, 1); assert(p.$("risk-adjust").disabled);
+  assert.match(p.$("risk-result").textContent, /核对审计.*勿直接重复调分/);
+  await p.trigger("risk-adjust"); assert.equal(p.posts().length, 1);
+  await p.trigger("refresh-risk"); assert(!p.$("risk-adjust").disabled);
+});
+
+await test("profile changes invalidate events, risk lists, detail and open confirmations", async () => {
+  const p = await page(); const lateEvents = deferred(), lateList = deferred(), lateDetail = deferred();
+  p.mock.get = (path) => path === "events" ? lateEvents.promise : path === "risk/users" ? lateList.promise
+    : path === "risk/users/detail" ? lateDetail.promise : undefined;
+  const requests = [p.app.loadEvents(), p.app.loadRiskUsers(), p.app.loadRiskDetail("default", "123")];
+  await flush(); p.mock.get = null; p.$("event-profile").value = "second"; await p.trigger("event-profile", "change");
+  lateEvents.resolve({ page: 1, page_size: 50, total: 1, items: [group({ content: "stale event" })] });
+  lateList.resolve({ page: 1, page_size: 30, total: 1, items: [group({ sender_uid: "stale uid" })] });
+  lateDetail.resolve(riskDetail({ profile_id: "default", uid: "123", page: 1 })); await Promise.all(requests);
+  assert(p.$("risk-detail").hidden); assert.equal(p.app.state.riskSelected, null);
+  assert.doesNotMatch(p.$("event-table").textContent, /stale/); assert.doesNotMatch(p.$("risk-users").textContent, /stale/);
+  await p.app.loadRiskDetail("second", "456");
+  const operation = p.$("risk-block").emit("click"); await flush();
+  p.$("event-profile").value = "default"; await p.trigger("event-profile", "change"); await operation;
+  assert(p.$("confirm-overlay").hidden); assert.equal(p.posts().length, 0);
+});
+
+await test("risk detail and writes cannot update DOM or send after pagehide", async () => {
+  const p = await page(); await p.app.loadRiskDetail("default", "123");
+  const operation = p.$("risk-block").emit("click"); await flush(); p.lifecycle("pagehide"); await operation;
+  assert.equal(p.posts().length, 0); assert(p.$("confirm-overlay").hidden); assert.equal(p.timers.size, 0);
+  const q = await page(), late = deferred(); q.mock.get = (path) => path === "risk/users/detail" ? late.promise : undefined;
+  const request = q.app.loadRiskDetail("default", "123"); await flush();
+  const before = q.$("risk-facts").textContent; q.lifecycle("pagehide");
+  late.resolve(riskDetail({ profile_id: "default", uid: "123", page: 1 })); await assert.rejects(request);
+  assert.equal(q.$("risk-facts").textContent, before);
+});
+
+await test("late risk detail for another user and an in-flight write cannot overwrite the selected identity", async () => {
+  const p = await page(), old = deferred();
+  p.mock.get = (path, query) => path === "risk/users/detail" ? query.uid === "123" ? old.promise : riskDetail(query) : undefined;
+  const first = p.app.loadRiskDetail("default", "123"); await flush();
+  await p.app.loadRiskDetail("second", "456");
+  old.resolve(riskDetail({ profile_id: "default", uid: "123", page: 1 })); await first;
+  assert.match(p.$("risk-facts").textContent, /second [/] 456/);
+  const response = deferred(); p.mock.post = () => response.promise;
+  const action = p.$("risk-block").emit("click"); await flush(); await p.trigger("confirm-accept");
+  await p.app.loadRiskDetail("second", "789");
+  const before = p.$("risk-facts").textContent;
+  response.resolve({ user: { manual_blocked: true } }); await action;
+  assert.equal(p.$("risk-facts").textContent, before); assert.match(before, /second [/] 789/);
+  assert.equal(lastCall(p, "risk/users/block").body.uid, "456");
+});
+
+await test("local policy rejection stays pending, names the reason and restores both buttons after refresh failure", async () => {
+  const p = await page(); let refreshFailed = false;
+  p.mock.get = (path) => { if (path === "publishing/reviews") { if (refreshFailed) throw new Error("offline refresh"); return { items: [review("comment")] }; } };
+  p.mock.post = () => ({ status: "pending", policy_blocked: true, reason: "comment_account_daily_limit", message: "账号今日评论发送次数已达上限", review: review("comment") });
+  await p.tab("comment-reviews"); const card = p.$("comment-review-list").children[0];
+  const [approve, reject] = card.querySelectorAll("button"); refreshFailed = true;
+  let operation = approve.emit("click"); await flush(); await p.trigger("confirm-accept"); await operation;
+  assert.match(card.textContent, /未发送，仍待审核.*账号今日评论发送次数已达上限/);
+  assert(!approve.disabled); assert(!reject.disabled);
+  p.mock.post = () => ({ status: "sent", review: review("comment", "sent") });
+  operation = approve.emit("click"); await flush(); await p.trigger("confirm-accept"); await operation;
+  assert.match(card.textContent, /发送成功/); assert(approve.disabled); assert(reject.disabled); assert.equal(p.posts().length, 2);
+});
+
+await test("automatic approval policy rejection shows pending in submission and lost approval responses stay disabled", async () => {
+  const p = await page(); p.$("publish-text").value = "策略阻止的提交";
+  p.mock.post = () => ({ status: "pending", policy_blocked: true, reason: "risk_manual_blocked", message: "用户已被人工封禁", review: review("post") });
+  await p.submit(); assert.match(p.$("publish-result").textContent, /未发送，仍待审核.*人工封禁/);
+  const q = await page(); q.mock.get = (path) => path === "publishing/reviews" ? { items: [review("comment")] } : undefined;
+  q.mock.post = () => { throw new Error("lost approval"); }; await q.tab("comment-reviews");
+  const card = q.$("comment-review-list").children[0], [approve, reject] = card.querySelectorAll("button");
+  const operation = approve.emit("click"); await flush(); await q.trigger("confirm-accept"); await operation;
+  assert(approve.disabled); assert(reject.disabled); assert.match(card.textContent, /不能直接重试发送/);
+});
+
+await test("event rows explain risk evaluation and behavior eligibility without inventing zero scores for skipped or legacy events", async () => {
+  const p = await page();
+  p.mock.get = (path) => path === "events" ? { page: 1, page_size: 50, total: 6, items: [
+    { risk_state: "evaluated", risk_behavior_eligible: 0, risk_evaluated_at: 1700000000, risk_delta: 25, risk_score_after: 45, risk_hits: ["inject_override", "<img src=x>"], reason: "<script>unsafe()</script>" },
+    { risk_state: "evaluated", risk_behavior_eligible: true, risk_evaluated_at: 1700000000, risk_delta: 0, risk_score_after: 0, risk_hits: [] },
+    { risk_state: "skipped_legacy", risk_behavior_eligible: false, risk_delta: 0, risk_score_after: 0 },
+    { risk_state: "skipped_disabled", risk_behavior_eligible: 1, risk_delta: 0, risk_score_after: 0 },
+    { risk_state: "pending", risk_behavior_eligible: null, risk_delta: 0, risk_score_after: 0 },
+    {},
+  ] } : undefined;
+  await p.app.loadEvents();
+  const rows = p.$("event-table").querySelectorAll("tbody tr");
+  assert.match(rows[0].textContent, /已评估.*本事件增分 25.*评估后分数 45.*inject_override/);
+  assert.match(rows[0].textContent, /历史回填或时间不明，未计短时风险/);
+  assert.match(rows[0].textContent, /原因：<script>unsafe/);
+  assert.match(rows[1].textContent, /已评估.*本事件增分 0.*评估后分数 0.*命中 无/);
+  assert.match(rows[1].textContent, /具备短时行为资格/);
+  assert.match(rows[2].textContent, /旧库未评估/);
+  assert.match(rows[3].textContent, /永久跳过（评分关闭）/);
+  assert.match(rows[4].textContent, /待评估/);
+  assert.match(rows[5].textContent, /API 未提供状态.*短时行为资格未提供/s);
+  for (const row of rows.slice(2)) assert.doesNotMatch(row.textContent, /已评估|本事件增分|评估后分数/);
+  assert.equal(p.$("event-table").querySelectorAll("script, img").length, 0);
+});
+
+await test("unrecorded users do not appear as fully evaluated zero risk", async () => {
+  const p = await page();
+  p.mock.get = (path, query) => path === "events"
+    ? { page: 1, page_size: 50, total: 1, items: [group({ has_record: false, risk_score: 0 })] } : undefined;
+  p.$("event-mode").value = "uid";
+  await p.trigger("event-mode", "change");
+  assert.match(p.$("event-table").textContent, /无风险档案（不表示已评估全部事件）/);
+  assert.doesNotMatch(p.$("event-table").textContent, /0 分 · 正常/);
 });
 
 console.log(`${passed} dashboard checks passed`);

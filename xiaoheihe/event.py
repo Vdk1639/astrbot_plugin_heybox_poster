@@ -52,11 +52,13 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
         capture_candidate: bool = False,
         candidate_metadata: dict[str, Any] | None = None,
         reply_timeout_seconds: int = 120,
+        admission_id: int | None = None,
     ) -> None:
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.runtime = runtime
         self.route = route
         self.event_id = event_id
+        self.admission_id = admission_id
         self.dry_run = dry_run
         self.account_id = str(getattr(message_obj, "self_id", "") or "")
         self.proactive = proactive
@@ -150,6 +152,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
                 if not text:
                     await self.runtime.fail_reply(
                         event_id=self.event_id,
+                        admission_id=self.admission_id,
                         route=self.route,
                         error="AstrBot 原生管线返回空回复",
                         generated_ms=generated_ms,
@@ -158,6 +161,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
                 if generated_ms > self.reply_timeout_seconds * 1000:
                     await self.runtime.expire_reply(
                         event_id=self.event_id,
+                        admission_id=self.admission_id,
                         route=self.route,
                         generated_ms=generated_ms,
                         reply_timeout_seconds=self.reply_timeout_seconds,
@@ -168,6 +172,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
                         raise RuntimeError("主动刷帖事件缺少持久化 event_id")
                     await self.runtime.capture_feed_candidate(
                         event_id=self.event_id,
+                        admission_id=self.admission_id,
                         route=self.route,
                         content=text,
                         metadata=self.candidate_metadata,
@@ -177,6 +182,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
                 else:
                     await self.runtime.deliver(
                         event_id=self.event_id,
+                        admission_id=self.admission_id,
                         route=self.route,
                         content=text,
                         dry_run=self.dry_run,
@@ -188,6 +194,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
             except asyncio.CancelledError as exc:
                 await self.runtime.fail_reply(
                     event_id=self.event_id,
+                    admission_id=self.admission_id,
                     route=self.route,
                     error=str(exc) or "事件发送任务被取消",
                     generated_ms=generated_ms,
@@ -196,6 +203,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
             except Exception as exc:
                 await self.runtime.fail_reply(
                     event_id=self.event_id,
+                    admission_id=self.admission_id,
                     route=self.route,
                     error=str(exc),
                     generated_ms=generated_ms,
@@ -230,6 +238,7 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
             generated_ms = max(0, int((time.perf_counter() - self._started_at) * 1000))
             await self.runtime.expire_reply(
                 event_id=self.event_id,
+                admission_id=self.admission_id,
                 route=self.route,
                 generated_ms=generated_ms,
                 reply_timeout_seconds=self.reply_timeout_seconds,

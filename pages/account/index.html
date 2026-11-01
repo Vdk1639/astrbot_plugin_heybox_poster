@@ -38,6 +38,11 @@
       <section id="overview" class="panel active">
         <div id="status-cards" class="card-grid"></div>
         <div class="surface">
+          <h2>通知处理与评论额度</h2>
+          <p>同一账号 UID 的多个档案共享额度。UTC 0 点（北京时间 08:00）重置；处理失败、模拟及审核拒绝不退处理次数，发送未知继续占用真实评论额度。</p>
+          <div id="reply-budgets" class="card-grid" aria-live="polite"></div>
+        </div>
+        <div class="surface">
           <h2>发布状态</h2>
           <div id="publishing-status" class="card-grid" aria-live="polite"></div>
         </div>
@@ -197,25 +202,56 @@
       <section id="events" class="panel">
         <div class="surface">
           <div class="filters">
-            <select id="event-status">
+            <select id="event-mode" aria-label="事件查看方式"><option value="">按事件</option><option value="uid">按用户</option></select>
+            <input id="event-profile" list="event-profile-options" placeholder="全部档案 / profile_id" aria-label="事件与风险档案筛选" />
+            <datalist id="event-profile-options"></datalist>
+            <select id="event-status" aria-label="事件状态">
               <option value="">全部状态</option>
               <option value="sent">已发送</option><option value="generated">已生成</option><option value="dry_run">模拟运行</option><option value="ignored">已忽略</option>
               <option value="retry_wait">等待重试</option><option value="send_unknown">发送状态未知</option>
               <option value="dead_letter">处理失败</option><option value="dispatched">已提交 AI</option>
             </select>
-            <input id="event-uid" placeholder="用户 UID" />
-            <input id="event-post" placeholder="帖子 ID" />
-            <input id="event-keyword" placeholder="关键词" />
+            <input id="event-uid" placeholder="用户 UID" aria-label="事件用户 UID" />
+            <input id="event-post" placeholder="帖子 ID" aria-label="帖子 ID" />
+            <input id="event-keyword" placeholder="关键词" aria-label="事件关键词" />
             <input id="event-start" type="datetime-local" aria-label="开始时间" />
             <input id="event-end" type="datetime-local" aria-label="结束时间" />
             <button id="search-events">查询</button>
+            <button id="event-back" class="secondary" hidden>返回聚合列表</button>
           </div>
+          <p>首次切换“按用户”且未设时间时，显式填入最近 7 天，可调整或清空。主动 AI 回复来自主动浏览，不代表作者触发了通知；历史回填/时间不明不计短时风险。</p>
+          <p id="event-range-hint">未设置时间时查询全部保留记录。时间输入使用浏览器本地时间，列表显示北京时间。</p>
           <div id="event-table" class="table-wrap"></div>
           <div class="button-row pagination">
             <button id="event-prev" class="secondary">上一页</button>
             <span id="event-page">第 1 页</span>
             <button id="event-next" class="secondary">下一页</button>
           </div>
+        </div>
+        <div class="surface">
+          <h2>用户风险记录</h2>
+          <p>与上方档案筛选共用 profile_id；分数是当前快照，不受事件时间范围影响。人工封禁独立于评分和自动过滤开关。缺 UID 不合并身份、不提供封禁操作。</p>
+          <div class="filters">
+            <input id="risk-uid" placeholder="用户 UID" aria-label="风险用户 UID" />
+            <select id="risk-level" aria-label="风险等级"><option value="">全部等级</option><option value="normal">正常</option><option value="watch">观察</option><option value="blocked">已达阈值</option></select>
+            <select id="risk-manual" aria-label="人工封禁筛选"><option value="">全部人工状态</option><option value="true">已人工封禁</option><option value="false">未人工封禁</option></select>
+            <button id="search-risk">查询风险</button>
+          </div>
+          <div id="risk-users" class="table-wrap"></div>
+          <div class="button-row pagination"><button id="risk-prev" class="secondary">上一页</button><span id="risk-page">第 1 页</span><button id="risk-next" class="secondary">下一页</button></div>
+        </div>
+        <div id="risk-detail" class="surface" hidden>
+          <div class="section-heading"><h2>风险详情</h2><button id="close-risk" class="secondary">关闭详情</button></div>
+          <div id="risk-facts" class="card-grid"></div>
+          <p id="risk-note"></p>
+          <p id="risk-result" role="status"></p>
+          <label>操作备注（最多 200 字）<input id="risk-operation-note" maxlength="200" /></label>
+          <p>调分不会自动重试；结果未确认时先刷新并核对审计。解除不自动恢复已忽略事件，不撤销已开始或未知的发送。</p>
+          <label><input id="risk-reset" type="checkbox" />解除时同时清零分数（保留审计及硬黑名单）</label>
+          <label>调整分数<input id="risk-delta" type="number" min="-1000" max="1000" step="1" value="0" /></label>
+          <div class="button-row"><button id="risk-block" class="danger">人工封禁</button><button id="risk-unblock" class="secondary">解除人工封禁</button><button id="risk-adjust" class="secondary">调整分数</button><button id="refresh-risk" class="secondary">刷新详情</button></div>
+          <div id="risk-audit" class="table-wrap"></div>
+          <div class="button-row pagination"><button id="risk-audit-prev" class="secondary">上一页审计</button><span id="risk-audit-page">第 1 页</span><button id="risk-audit-next" class="secondary">下一页审计</button></div>
         </div>
       </section>
 
