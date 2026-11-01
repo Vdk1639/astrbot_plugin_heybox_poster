@@ -272,14 +272,16 @@ function schemaDefault(descriptor) {
 }
 
 function fieldLabel(descriptor, key) {
-  return descriptor.description || key;
+  return (descriptor.description || key).split("；", 1)[0];
 }
 
 function appendHint(host, descriptor) {
-  if (!descriptor.hint) return;
+  const detail = (descriptor.description || "").split("；").slice(1).join("；");
+  const text = [detail, descriptor.hint].filter(Boolean).join("\n");
+  if (!text) return;
   const hint = document.createElement("small");
   hint.className = "config-hint";
-  hint.textContent = descriptor.hint;
+  hint.textContent = text;
   host.append(hint);
 }
 
@@ -619,6 +621,9 @@ async function loadStatus() {
   const profiles = state.status.profiles || [];
   const first = profiles[0] || {};
   const cards = $("status-cards");
+  const latestError = first.last_error || first.last_client_error?.message;
+  const errorCard = metric("最近错误", latestError);
+  if (latestError) errorCard.classList.add("metric-detail");
   cards.replaceChildren(
     metric("插件版本", state.status.version),
     metric("登录状态", first.status || "idle"),
@@ -626,7 +631,7 @@ async function loadStatus() {
     metric("UID", first.uid),
     metric("最后轮询", formatTime(first.last_poll_at)),
     metric("最近成功请求", formatTime(first.last_success_request_at)),
-    metric("最近错误", first.last_error || first.last_client_error?.message),
+    errorCard,
     metric("@通知 原始/接收", notificationMetric(first, "mention")),
     metric("回复通知 原始/接收", notificationMetric(first, "reply")),
     metric("待处理队列", state.status.queue_length || 0),

@@ -207,6 +207,23 @@ await test("complete reference navigation, safe DOM and poster bridge identity",
   assert.match(p.$("publishing-status").textContent, /uid-2/);
 });
 
+await test("overview renders full errors as separate details without enlarging ordinary metrics", async () => {
+  const p = await page();
+  const message = "请求失败，请稍后核对。<img src=x onerror=bad()> " + "upstream_timeout_".repeat(12);
+  for (const profile of [{ last_error: message, last_client_error: { message: "older error" } },
+    { last_client_error: { message } }, {}]) {
+    p.mock.get = (path) => path === "status" ? { profiles: [profile], tasks: [], adapters: [], alerts: [] } : undefined;
+    await p.app.loadStatus();
+    const cards = p.$("status-cards");
+    const error = cards.querySelectorAll(".metric").find((card) => card.querySelector(".label").textContent === "最近错误");
+    const hasError = Boolean(profile.last_error || profile.last_client_error);
+    assert.equal(error.classList.contains("metric-detail"), hasError);
+    assert.equal(error.querySelector(".value").textContent, hasError ? message : "—");
+    assert.equal(cards.querySelectorAll(".metric-detail").length, hasError ? 1 : 0);
+    assert.equal(cards.querySelectorAll("img").length, 0);
+  }
+});
+
 await test("all requests wait for authenticated bridge; no bridge fails visibly", async () => {
   const auth = deferred(); const p = await page({ ready: auth.promise });
   const tab = p.tab("post-reviews");
@@ -390,6 +407,21 @@ await test("settings save the shared profile schema and validate controls", asyn
   assert.equal(p.posts()[0].body.profiles[0].display_name, "修改后的档案");
   assert.equal(p.posts()[0].body.publishing.comment_review_required, true);
   assert.match(p.$("config-result").textContent, /publishing/);
+});
+
+await test("settings separate long labels from full guidance using safe text", async () => {
+  const p = await page(), localSchema = plain(schema);
+  localSchema.reply.items.reply_daily_per_user = { ...localSchema.reply.items.reply_daily_per_user,
+    description: "每日处理次数；0 不限；失败/模拟/审核拒绝不退", hint: "<img src=x onerror=bad()>" };
+  p.mock.get = (path) => path === "config/schema" ? localSchema : undefined;
+  await p.app.loadConfig();
+  const form = p.$("config-form");
+  const field = form.querySelector('input[data-config-key="reply_daily_per_user"]').parentNode;
+  assert.equal(field.querySelector(".config-label").textContent, "每日处理次数");
+  assert.equal(field.querySelector(".config-hint").textContent, "0 不限；失败/模拟/审核拒绝不退\n<img src=x onerror=bad()>");
+  const toggle = form.querySelectorAll("label.config-toggle").find((row) => row.querySelector("strong").textContent === "同一楼层只接受一次通知回复");
+  assert.equal(toggle.querySelector(".config-hint").textContent, actualSchema.reply.items.reply_thread_once.description.split("；").slice(1).join("；"));
+  assert.equal(form.querySelectorAll("img").length, 0);
 });
 
 await test("post visibility settings use labelled choices and save numeric values", async () => {

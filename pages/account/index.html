@@ -256,7 +256,7 @@
           <p id="risk-result" role="status"></p>
           <label>操作备注（最多 200 字）<input id="risk-operation-note" maxlength="200" /></label>
           <p>调分不会自动重试；结果未确认时先刷新并核对审计。解除不自动恢复已忽略事件，不撤销已开始或未知的发送。</p>
-          <label><input id="risk-reset" type="checkbox" />解除时同时清零分数（保留审计及硬黑名单）</label>
+          <label class="checkbox-row"><input id="risk-reset" type="checkbox" /><span>解除时同时清零分数（保留审计及硬黑名单）</span></label>
           <label>调整分数<input id="risk-delta" type="number" min="-1000" max="1000" step="1" value="0" /></label>
           <div class="button-row"><button id="risk-block" class="danger">人工封禁</button><button id="risk-unblock" class="secondary">解除人工封禁</button><button id="risk-adjust" class="secondary">调整分数</button><button id="refresh-risk" class="secondary">刷新详情</button></div>
           <div id="risk-audit" class="table-wrap"></div>
