@@ -122,8 +122,10 @@ class XhhPosterPlugin(Star):
             from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
             return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "outbox.sqlite3"
-        except Exception:
-            return Path(__file__).resolve().parent / "outbox.sqlite3"
+        except Exception as exc:
+            raise RuntimeError(
+                "无法获取 AstrBot 插件数据目录，请检查宿主数据目录接口是否可用"
+            ) from exc
 
     async def terminate(self) -> None:
         await self.community.terminate()

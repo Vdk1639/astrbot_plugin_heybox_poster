@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-import logging
 from collections import deque
 from datetime import UTC, datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+
+from astrbot.api import logger
 
 from .security import redact_log_data, redact_log_text
 from .task_manager import TaskManager
 
-try:
-    from astrbot.api import logger as astrbot_logger
-except ImportError:
-    astrbot_logger = None
+_LEVELS = {
+    "DEBUG": 10, "INFO": 20, "WARNING": 30, "WARN": 30,
+    "ERROR": 40, "CRITICAL": 50, "FATAL": 50,
+}
+_MAX_FILE_BYTES = 5 * 1024 * 1024
 
 
 class LoggingService:
@@ -33,23 +34,11 @@ class LoggingService:
         log_dir = data_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_path = log_dir / "xiaoheihe.log"
-        self._logger = logging.getLogger(f"astrbot.xiaoheihe.file.{id(self)}")
-        self._logger.setLevel(getattr(logging, level.upper(), logging.INFO))
-        # AstrBot's root formatter expects fields injected only by its public
-        # logger. Keep the plugin file logger isolated, then emit separately
-        # through astrbot.api.logger when that public API is available.
-        self._logger.propagate = False
-        per_file = 5 * 1024 * 1024
-        backups = max(1, min(39, int(total_limit_mb) // 5 - 1))
-        handler = RotatingFileHandler(
-            self._log_path,
-            maxBytes=per_file,
-            backupCount=backups,
-            encoding="utf-8",
+        self.reconfigure(
+            level=level,
+            max_memory_entries=max_memory_entries,
+            total_limit_mb=total_limit_mb,
         )
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        self._handler = handler
-        self._logger.addHandler(handler)
 
     @property
     def log_path(self) -> Path:
@@ -73,27 +62,32 @@ class LoggingService:
             "details": redact_log_data(details or {}),
         }
         self._entries.append(entry)
-        log_method = getattr(self._logger, normalized_level.lower(), self._logger.info)
-        log_method(
-            "[profile=%s] %s %s",
-            profile_id or "-",
-            safe_message,
-            entry["details"] or "",
+        text = (
+            f"[小黑盒][profile={profile_id or '-'}] "
+            f"{safe_message} {entry['details'] or ''}"
         )
-        if astrbot_logger is not None:
-            astrbot_log_method = getattr(
-                astrbot_logger,
-                normalized_level.lower(),
-                astrbot_logger.info,
-            )
-            astrbot_log_method(
-                "[小黑盒][profile=%s] %s %s",
-                profile_id or "-",
-                safe_message,
-                entry["details"] or "",
-            )
+        log_method = getattr(logger, normalized_level.lower(), logger.info)
+        log_method(text)
+        if _LEVELS.get(normalized_level, 20) >= self._min_level:
+            try:
+                self._write_file(f"{entry['time']} {normalized_level} {text}\n")
+            except OSError as exc:
+                logger.warning(f"[小黑盒] 本地日志写入失败：{type(exc).__name__}")
         self._tasks.publish_sse({"type": "log", "entry": entry})
         return entry
+
+    def _write_file(self, text: str) -> None:
+        if self._log_path.exists():
+            size = self._log_path.stat().st_size
+            if size and size + len(text.encode("utf-8")) >= _MAX_FILE_BYTES:
+                for index in range(self._backup_count, 0, -1):
+                    source = self._log_path.with_name(
+                        f"xiaoheihe.log.{index - 1}" if index > 1 else "xiaoheihe.log"
+                    )
+                    if source.exists():
+                        source.replace(self._log_path.with_name(f"xiaoheihe.log.{index}"))
+        with self._log_path.open("a", encoding="utf-8", newline="") as stream:
+            stream.write(text)
 
     def list(self, *, level: str = "", keyword: str = "", limit: int = 200) -> list[dict[str, Any]]:
         level_filter = level.upper()
@@ -123,12 +117,11 @@ class LoggingService:
         max_memory_entries: int,
         total_limit_mb: int,
     ) -> None:
-        self._logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+        self._min_level = _LEVELS.get(level.upper(), 20)
         max_entries = max(100, min(max_memory_entries, 10000))
         if self._entries.maxlen != max_entries:
             self._entries = deque(list(self._entries)[-max_entries:], maxlen=max_entries)
-        self._handler.backupCount = max(1, min(39, int(total_limit_mb) // 5 - 1))
+        self._backup_count = max(1, min(39, int(total_limit_mb) // 5 - 1))
 
     def close(self) -> None:
-        self._logger.removeHandler(self._handler)
-        self._handler.close()
+        """文件在每次写入后关闭，无需释放常驻句柄。"""

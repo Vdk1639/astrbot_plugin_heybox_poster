@@ -2,7 +2,7 @@
 
 在一个 AstrBot 插件内管理小黑盒账号、发帖、评论、通知轮询和主动浏览，使用统一管理面板审核内容。
 
-**当前版本：v0.7.0** · AstrBot 要求 **>=4.26.0,<5**。管理页依赖 `astrbot.api.web` 和已登录的 Dashboard 会话。
+**当前版本：v0.7.1** · AstrBot 要求 **>=4.26.0,<5**。管理页依赖 `astrbot.api.web` 和已登录的 Dashboard 会话。
 
 > 本项目整合了 [小黑盒适配器](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter) 的原生平台、通知轮询、主动浏览、管理面板与相关测试能力，感谢作者 [RyanVaderAn](https://github.com/674537331) 的开源贡献。
 

@@ -281,10 +281,34 @@ class PluginSmokeTests(PluginTestCase):
         self.assertIn("登录态", plugin._friendly_error(XhhError("登录失败", status="login")))
         self.assertIn("参数错误", plugin._friendly_error(ValueError("标题不能为空")))
 
-    def test_default_outbox_path_falls_back(self):
+    def test_default_outbox_path_uses_star_tools(self):
         plugin = self._plugin()
-        with mock.patch("astrbot.api.star.StarTools.get_data_dir", side_effect=RuntimeError("unavailable")):
-            self.assertEqual(XhhPosterPlugin._default_outbox_path(plugin), ROOT / "outbox.sqlite3")
+        data_dir = plugin.runtime.data_dir
+        with mock.patch("astrbot.api.star.StarTools.get_data_dir", return_value=data_dir) as get_data_dir:
+            self.assertEqual(XhhPosterPlugin._default_outbox_path(plugin), data_dir / "outbox.sqlite3")
+        get_data_dir.assert_called_once_with("astrbot_plugin_heybox_poster")
+
+    def test_default_outbox_path_uses_legacy_data_directory(self):
+        plugin = self._plugin()
+        data_dir = plugin.runtime.data_dir
+        module = mock.Mock(get_astrbot_plugin_data_path=mock.Mock(return_value=str(data_dir)))
+        with (
+            mock.patch("astrbot.api.star.StarTools.get_data_dir", side_effect=RuntimeError("unavailable")),
+            mock.patch.dict("sys.modules", {"astrbot.core.utils.astrbot_path": module}),
+        ):
+            self.assertEqual(
+                XhhPosterPlugin._default_outbox_path(plugin),
+                data_dir / "astrbot_plugin_heybox_poster" / "outbox.sqlite3",
+            )
+
+    def test_default_outbox_path_requires_host_data_directory(self):
+        plugin = self._plugin()
+        with (
+            mock.patch("astrbot.api.star.StarTools.get_data_dir", side_effect=RuntimeError("unavailable")),
+            mock.patch.dict("sys.modules", {"astrbot.core.utils.astrbot_path": None}),
+            self.assertRaisesRegex(RuntimeError, "无法获取 AstrBot 插件数据目录"),
+        ):
+            XhhPosterPlugin._default_outbox_path(plugin)
 
     async def test_service_rate_limit_survives_restart_and_is_account_scoped(self):
         plugin = self._plugin(cooldown_seconds=0)

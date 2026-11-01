@@ -5,6 +5,7 @@ import types
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+from unittest.mock import Mock
 
 
 class Plain:
@@ -271,6 +272,7 @@ def install() -> None:
     provider.LLMResponse = LLMResponse
     core_agent_message.TextPart = TextPart
     api.AstrBotConfig = AstrBotConfig
+    api.logger = Mock(spec=["debug", "info", "warning", "warn", "error", "critical", "fatal", "exception"])
     star.Context = object
     star.Star = Star
     star.StarTools = StarTools
