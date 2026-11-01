@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 
 from adapter_tests.astrbot_stubs import REQUEST, Query
 from xiaoheihe.config_service import ConfigService
@@ -42,6 +43,20 @@ async def test_config_api_reads_and_saves_same_object(fake_config) -> None:
     saved = await controller.config_save()
     assert saved["status_code"] == 200
     assert fake_config["reply"]["max_reply_chars"] == 321
+    assert fake_config.save_count == 1
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+async def test_config_api_keeps_direct_reply_preference_when_other_settings_change(fake_config, enabled):
+    fake_config['reply']['reply_to_direct_replies'] = enabled
+    controller = WebApiController(FakeRuntime(fake_config))
+    REQUEST.username = 'admin'
+    payload = (await controller.config_get())['json']
+    payload['publishing']['comment_daily_limit'] = 12
+    REQUEST._json = payload
+    assert (await controller.config_save())['status_code'] == 200
+    reloaded = WebApiController(FakeRuntime(fake_config))
+    assert (await reloaded.config_get())['json']['reply']['reply_to_direct_replies'] is enabled
     assert fake_config.save_count == 1
 
 

@@ -66,6 +66,24 @@ async def test_config_save_uses_same_object_and_callback(fake_config) -> None:
     assert changed_seen == [{"reply"}]
 
 
+@pytest.mark.parametrize('enabled', [True, False])
+async def test_direct_reply_setting_survives_upgrade_save_and_reload(fake_config, enabled):
+    fake_config['reply']['reply_to_direct_replies'] = enabled
+    for field in ('reply_thread_once', 'reply_daily_per_user', 'reply_daily_total', 'reply_owner_exempt'):
+        fake_config['reply'].pop(field)
+    fake_config.pop('risk')
+    fake_config['publishing'].pop('comment_daily_limit')
+    service = ConfigService(fake_config)
+    assert service.snapshot()['reply']['reply_to_direct_replies'] is enabled
+    candidate = service.snapshot()
+    candidate['publishing']['comment_daily_limit'] = 12
+    assert await service.save(candidate) == {'publishing'}
+    reloaded = ConfigService(fake_config)
+    assert reloaded.snapshot()['reply']['reply_to_direct_replies'] is enabled
+    assert reloaded.snapshot()['reply']['reply_daily_total'] == 30
+    assert reloaded.ui_schema()['reply']['items']['reply_to_direct_replies']['default'] is True
+
+
 @pytest.mark.asyncio
 async def test_config_allows_explicit_unreviewed_proactive_send(fake_config) -> None:
     service = ConfigService(fake_config)

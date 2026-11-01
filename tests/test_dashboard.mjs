@@ -137,7 +137,7 @@ async function page(options = {}) {
     if (mock.get) { const value = await mock.get(path, query); if (value !== undefined) return value; }
     if (path === "config" || path === "config/defaults") return plain(config);
     if (path === "config/schema") return plain(schema);
-    if (path === "status") return { version: "v0.8.0", profiles: [], tasks: [], adapters: [], alerts: [] };
+    if (path === "status") return { version: "v0.8.1", profiles: [], tasks: [], adapters: [], alerts: [] };
     if (path === "publishing/status") return { profile_id: "second", has_credentials: true, uid: "uid-2", dry_run: true, post_review_required: true, comment_review_required: true, counts: { pending: 2 } };
     if (path === "auth/status") return { profile_id: query.profile_id, state: "logged_in", nickname: query.profile_id, uid: query.profile_id };
     if (path === "events") return { page: 1, page_size: 50, total: 0, items: [] };
@@ -384,6 +384,28 @@ await test("settings save the shared profile schema and validate controls", asyn
   assert.equal(p.posts()[0].body.profiles[0].display_name, "修改后的档案");
   assert.equal(p.posts()[0].body.publishing.comment_review_required, true);
   assert.match(p.$("config-result").textContent, /publishing/);
+});
+
+await test("settings retain both direct-reply preferences across render save and reload", async () => {
+  for (const enabled of [true, false]) {
+    const p = await page();
+    let saved = plain(config);
+    saved.reply.reply_to_direct_replies = enabled;
+    p.mock.get = (path) => path === "config" ? plain(saved) : undefined;
+    p.mock.post = (path, body) => {
+      if (path === "config/save") { saved = plain(body); return { changed: ["reply"] }; }
+    };
+    await p.app.loadConfig();
+    const toggle = () => p.$("config-form").querySelectorAll("label.config-toggle")
+      .find((label) => label.textContent.includes(actualSchema.reply.items.reply_to_direct_replies.description)).querySelector("input");
+    assert.equal(toggle().checked, enabled);
+    const limit = p.$("config-form").querySelector('input[data-config-key="reply_daily_per_user"]');
+    limit.value = "4"; await limit.emit("input");
+    await p.trigger("save-config");
+    assert.equal(p.posts()[0].body.reply.reply_to_direct_replies, enabled);
+    assert.equal(p.posts()[0].body.reply.reply_daily_per_user, 4);
+    assert.equal(toggle().checked, enabled);
+  }
 });
 
 await test("event filters, logs, diagnostics and storage keep adapter API contracts", async () => {
