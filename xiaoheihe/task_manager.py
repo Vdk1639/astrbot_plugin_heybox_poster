@@ -13,7 +13,6 @@ from .security import redact_text
 class TaskManager:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._profile_pollers: dict[str, str] = {}
         self._sse_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._failures: deque[dict[str, str]] = deque(maxlen=50)
         self._closed = False
@@ -58,32 +57,12 @@ class TaskManager:
     async def start_profile_poller(
         self, profile_id: str, awaitable: Awaitable[Any]
     ) -> asyncio.Task[Any]:
-        name = f"xhh-poll-{profile_id}"
-        async with self._lock:
-            existing_name = self._profile_pollers.get(profile_id)
-            if existing_name:
-                existing = self._tasks.get(existing_name)
-                if existing and not existing.done():
-                    if hasattr(awaitable, "close"):
-                        awaitable.close()  # type: ignore[attr-defined]
-                    return existing
-            if self._closed:
-                if hasattr(awaitable, "close"):
-                    awaitable.close()  # type: ignore[attr-defined]
-                raise RuntimeError("TaskManager 已关闭")
-            task = asyncio.create_task(awaitable, name=name)
-            self._tasks[name] = task
-            self._profile_pollers[profile_id] = name
-            task.add_done_callback(lambda completed, key=name: self._drop(key, completed))
-            return task
+        return await self.start(f"xhh-poll-{profile_id}", awaitable)
 
     def _drop(self, name: str, task: asyncio.Task[Any]) -> None:
         current = self._tasks.get(name)
         if current is task:
             self._tasks.pop(name, None)
-        for profile_id, poller_name in tuple(self._profile_pollers.items()):
-            if poller_name == name:
-                self._profile_pollers.pop(profile_id, None)
         if task.cancelled():
             return
         with suppress(asyncio.CancelledError):
@@ -137,7 +116,6 @@ class TaskManager:
             self._closed = True
             tasks = tuple(self._tasks.values())
             self._tasks.clear()
-            self._profile_pollers.clear()
         for task in tasks:
             if not task.done():
                 task.cancel()

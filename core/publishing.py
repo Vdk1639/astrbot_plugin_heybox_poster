@@ -6,7 +6,6 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from typing import Any
 
 from ..xiaoheihe.api_client import SendUncertainError, XiaoheiheApiError
 from ..xiaoheihe.models import EventState, RoutingTarget

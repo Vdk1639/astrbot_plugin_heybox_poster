@@ -5,6 +5,7 @@ import pytest
 from xiaoheihe.security import (
     SecurityError,
     redact_data,
+    redact_log_data,
     redact_log_text,
     redact_text,
     sanitize_reply_text,
@@ -49,6 +50,23 @@ def test_sensitive_log_redaction() -> None:
         "cookie": "[REDACTED]",
         "nested": {"token": "[REDACTED]"},
     }
+
+
+@pytest.mark.parametrize("redact, expected_url", [
+    (redact_data, "https://user:password@example.test/a.png?signature=private#fragment"),
+    (redact_log_data, "https://example.test/a.png?[REDACTED]#[REDACTED]"),
+])
+def test_nested_redaction_preserves_types_and_input(redact, expected_url) -> None:
+    url = "https://user:password@example.test/a.png?signature=private#fragment"
+    payload = {7: [{"cookie": {"nested": "private"}, "url": url},
+                   ("Bearer secret-value", None, 0, False)], "session_mappings": 2}
+    assert redact(payload) == {
+        "7": [{"cookie": "[REDACTED]", "url": expected_url},
+              ("Bearer [REDACTED]", None, 0, False)],
+        "session_mappings": 2,
+    }
+    assert payload[7][0] == {"cookie": {"nested": "private"}, "url": url}
+    assert payload[7][1][0] == "Bearer secret-value"
 
 
 def test_reply_cleanup_and_length() -> None:

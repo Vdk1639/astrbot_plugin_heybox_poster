@@ -7,7 +7,7 @@ import os
 import re
 import socket
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -77,32 +77,25 @@ def redact_log_text(value: str) -> str:
 
 
 def redact_data(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): ("[REDACTED]" if SENSITIVE_KEY_RE.search(str(key)) else redact_data(item))
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_data(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(redact_data(item) for item in value)
-    if isinstance(value, str):
-        return redact_text(value)
-    return value
+    return _redact_data(value, redact_text)
 
 
 def redact_log_data(value: Any) -> Any:
+    return _redact_data(value, redact_log_text)
+
+
+def _redact_data(value: Any, redact_string: Callable[[str], str]) -> Any:
     if isinstance(value, Mapping):
         return {
-            str(key): ("[REDACTED]" if SENSITIVE_KEY_RE.search(str(key)) else redact_log_data(item))
+            str(key): ("[REDACTED]" if SENSITIVE_KEY_RE.search(str(key)) else _redact_data(item, redact_string))
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [redact_log_data(item) for item in value]
+        return [_redact_data(item, redact_string) for item in value]
     if isinstance(value, tuple):
-        return tuple(redact_log_data(item) for item in value)
+        return tuple(_redact_data(item, redact_string) for item in value)
     if isinstance(value, str):
-        return redact_log_text(value)
+        return redact_string(value)
     return value
 
 

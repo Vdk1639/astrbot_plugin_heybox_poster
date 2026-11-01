@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from xiaoheihe.provider_routing import build_provider_route_plan
 
 
-def test_provider_route_plan_keeps_image_chain_order_and_deduplicates() -> None:
+@pytest.mark.parametrize("fallbacks", [
+    ["astrbot-main", "fallback-1", "fallback-1"],
+    (" astrbot-main ", None, "", "fallback-1", "fallback-1"),
+])
+def test_provider_route_plan_keeps_image_chain_order_and_deduplicates(fallbacks) -> None:
     plan = build_provider_route_plan(
         {
             "llm_provider_id": "plugin-main",
@@ -11,7 +17,7 @@ def test_provider_route_plan_keeps_image_chain_order_and_deduplicates() -> None:
         },
         {
             "default_image_caption_provider_id": "astrbot-image",
-            "fallback_chat_models": ["astrbot-main", "fallback-1", "fallback-1"],
+            "fallback_chat_models": fallbacks,
         },
         astrbot_main_provider_id="astrbot-main",
     )

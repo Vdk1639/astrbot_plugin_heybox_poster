@@ -2636,14 +2636,6 @@ class CommunityAgent:
             ]
         )
 
-    @classmethod
-    def _normalized_image_sources(
-        cls,
-        event: AstrMessageEvent,
-        request: ProviderRequest,
-    ) -> list[str]:
-        return [item.source for item in cls._normalized_image_attributions(event, request)]
-
     async def _caption_proactive_images(
         self,
         event: AstrMessageEvent,

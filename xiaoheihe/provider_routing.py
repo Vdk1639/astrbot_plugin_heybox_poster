@@ -7,12 +7,7 @@ from typing import Any
 def _provider_ids(values: object) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         return ()
-    result: list[str] = []
-    for value in values:
-        provider_id = str(value or "").strip()
-        if provider_id and provider_id not in result:
-            result.append(provider_id)
-    return tuple(result)
+    return _unique_provider_ids(tuple(values))
 
 
 def _unique_provider_ids(*values: str | tuple[str, ...]) -> tuple[str, ...]:

@@ -7,22 +7,30 @@ import pytest
 from xiaoheihe.task_manager import TaskManager
 
 
-async def test_named_task_reuse_cancel_and_close() -> None:
+@pytest.mark.parametrize("method, key", [("start", "same"), ("start_profile_poller", "p")])
+async def test_named_task_reuse_cancel_and_close(method, key) -> None:
     manager = TaskManager()
     gate = asyncio.Event()
+    start = getattr(manager, method)
 
     async def worker():
         await gate.wait()
 
-    first = await manager.start("same", worker())
-    second = await manager.start("same", worker())
+    first = await start(key, worker())
+    unused = worker()
+    second = await start(key, unused)
     assert first is second
-    await manager.cancel("same")
-    assert "same" not in manager.task_names()
+    assert unused.cr_frame is None
+    await manager.cancel(first.get_name())
+    assert first.get_name() not in manager.task_names()
+    restarted = await start(key, worker())
+    assert restarted is not first
     await manager.close()
     await manager.close()
+    late = worker()
     with pytest.raises(RuntimeError, match="关闭"):
-        await manager.start("late", worker())
+        await start(key, late)
+    assert late.cr_frame is None
 
 
 async def test_sse_queue_is_bounded_and_closes() -> None:
@@ -43,9 +51,14 @@ async def test_single_poller_per_profile() -> None:
     async def poller():
         await gate.wait()
 
-    first = await manager.start_profile_poller("p", poller())
-    second = await manager.start_profile_poller("p", poller())
+    first, second, other = await asyncio.gather(
+        manager.start_profile_poller("p", poller()),
+        manager.start_profile_poller("p", poller()),
+        manager.start_profile_poller("other", poller()),
+    )
     assert first is second
+    assert other is not first
+    assert manager.task_names() == ["xhh-poll-other", "xhh-poll-p"]
     await manager.close()
 
 
