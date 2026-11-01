@@ -10,7 +10,10 @@ export function createPublishing({ bridge, busy, confirmAction, metric, toast, f
   let submitting = false;
   let submittedText = null;
   let uncertain = false;
-  let defaultsApplied = false;
+  const defaults = {
+    "post-topics": $("post-topics").value,
+    "post-view-limit": $("post-view-limit").value,
+  };
 
   function configure(config) {
     const policy = config.publishing || {};
@@ -24,10 +27,12 @@ export function createPublishing({ bridge, busy, confirmAction, metric, toast, f
       select.append(option);
     }
     select.value = [...select.options].some((option) => option.value === previous) ? previous : policy.profile_id || "default";
-    if (!defaultsApplied) {
-      $("post-topics").value = policy.default_topic_ids || "";
-      $("post-view-limit").value = String(policy.view_limit || 1);
-      defaultsApplied = true;
+    for (const [id, value] of Object.entries({
+      "post-topics": policy.default_topic_ids || "",
+      "post-view-limit": String(policy.view_limit || 1),
+    })) {
+      if ($(id).value === defaults[id]) $(id).value = value;
+      defaults[id] = value;
     }
     $("publishing-policy").textContent = `默认档案：${policy.profile_id || "default"} · 模拟运行：${policy.dry_run !== false ? "开启" : "关闭"} · 发帖审核：${policy.post_review_required !== false ? "开启" : "关闭"} · 评论审核：${policy.comment_review_required !== false ? "开启" : "关闭"}`;
   }

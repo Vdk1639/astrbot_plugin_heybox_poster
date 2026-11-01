@@ -34,7 +34,6 @@ for (const method of ["apiGet", "apiPost"]) {
 }
 
 window.addEventListener("pagehide", () => { closed = true; });
-window.addEventListener("beforeunload", () => { closed = true; });
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) window.location.reload();
 });

@@ -3,6 +3,8 @@ import { createPublishing } from "./publishing.js";
 const state = {
   config: null,
   savedConfig: null,
+  configDirty: false,
+  configBusy: false,
   configSchema: null,
   topicNames: new Map(),
   status: null,
@@ -29,6 +31,7 @@ const state = {
   toastTimer: null,
   confirmResolve: null,
   confirmPreviousFocus: null,
+  confirmFocusFrame: null,
   unloaded: false,
   loginBusy: false,
   requests: {},
@@ -37,6 +40,7 @@ const state = {
 
 const pendingButtons = new WeakSet();
 const candidateActions = new Set();
+const candidateDrafts = new Map();
 const nextRequest = (key) => state.requests[key] = (state.requests[key] || 0) + 1;
 const currentRequest = (key, version) => !state.unloaded && state.requests[key] === version;
 
@@ -109,10 +113,19 @@ function closeConfirmation(accepted) {
   const resolve = state.confirmResolve;
   state.confirmResolve = null;
   $("confirm-overlay").hidden = true;
+  $("page-content").inert = false;
   $("confirm-accept").classList.remove("danger");
   const previousFocus = state.confirmPreviousFocus;
   state.confirmPreviousFocus = null;
-  previousFocus?.focus?.();
+  if (!state.unloaded && previousFocus) {
+    state.confirmFocusFrame = requestAnimationFrame(() => {
+      state.confirmFocusFrame = null;
+      if (state.unloaded || state.confirmResolve) return;
+      const target = previousFocus.isConnected !== false && !previousFocus.disabled
+        ? previousFocus : document.querySelector(".tabs button.active");
+      target?.focus();
+    });
+  }
   resolve?.(accepted);
 }
 
@@ -125,9 +138,10 @@ function confirmAction(message, { confirmText = "确认", danger = false } = {})
   accept.textContent = confirmText;
   accept.classList.toggle("danger", danger);
   $("confirm-overlay").hidden = false;
+  $("page-content").inert = true;
   return new Promise((resolve) => {
     state.confirmResolve = resolve;
-    queueMicrotask(() => accept.focus());
+    queueMicrotask(() => { if (state.confirmResolve === resolve) $("confirm-cancel").focus(); });
   });
 }
 
@@ -135,9 +149,25 @@ async function busy(button, work) {
   if (state.unloaded || pendingButtons.has(button)) return;
   pendingButtons.add(button);
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
   try { await bridge.ready(); return await work(); }
   catch (error) { toast(error.message, "error"); return undefined; }
-  finally { pendingButtons.delete(button); if (!state.unloaded) button.disabled = false; }
+  finally {
+    pendingButtons.delete(button);
+    if (!state.unloaded) { button.disabled = false; button.removeAttribute("aria-busy"); }
+  }
+}
+
+function updateConfigState() {
+  state.configDirty = JSON.stringify(state.config) !== JSON.stringify(state.savedConfig);
+  $("config-unsaved").hidden = !state.configDirty;
+}
+
+function setConfigBusy(busy) {
+  state.configBusy = busy;
+  $("config-form").disabled = busy;
+  $("config-form").setAttribute("aria-busy", String(busy));
+  $("save-config").disabled = $("restore-defaults").disabled = busy;
 }
 
 function metric(label, value) {
@@ -254,6 +284,8 @@ function appendHint(host, descriptor) {
 }
 
 function createScalarField(key, descriptor, value, update) {
+  const apply = update;
+  update = (value) => { apply(value); updateConfigState(); };
   if (descriptor.type === "bool") {
     const row = document.createElement("label");
     row.className = "config-toggle";
@@ -264,6 +296,7 @@ function createScalarField(key, descriptor, value, update) {
     appendHint(copy, descriptor);
     const control = document.createElement("input");
     control.type = "checkbox";
+    control.setAttribute("role", "switch");
     control.checked = Boolean(value);
     control.addEventListener("change", () => update(control.checked));
     row.append(copy, control);
@@ -325,9 +358,10 @@ function createScalarField(key, descriptor, value, update) {
           && (maximum === undefined || parsed <= maximum)) {
           update(parsed);
           control.setCustomValidity("");
+          control.removeAttribute("aria-invalid");
         } else {
           control.setCustomValidity("请输入范围内的有效数字（整数配置不接受小数）");
-          control.reportValidity();
+          control.setAttribute("aria-invalid", "true");
         }
       };
       control.addEventListener("input", readNumber);
@@ -392,6 +426,7 @@ function createDefaultTopicsField(descriptor, group) {
       remove.addEventListener("click", () => {
         if (!current()) return;
         group.default_topic_ids = selected().filter((value) => value !== id).join(",");
+        updateConfigState();
         renderPicked();
       });
       picked.append(remove);
@@ -443,6 +478,7 @@ function createDefaultTopicsField(descriptor, group) {
     if (!current() || !choices.value) return;
     if (group.profile_id !== resultProfile) { emptyChoices("发帖档案已变更，请重新搜索"); return; }
     group.default_topic_ids = [...new Set([...selected(), choices.value])].join(",");
+    updateConfigState();
     choices.value = "";
     renderPicked();
   });
@@ -538,7 +574,7 @@ function renderProfiles(schema) {
 function renderObjectGroup(groupKey, schema) {
   const wrapper = document.createElement("details");
   wrapper.className = "config-section";
-  wrapper.open = true;
+  wrapper.open = groupKey === "publishing" || groupKey === "reply";
   const summary = document.createElement("summary");
   const heading = document.createElement("span");
   heading.textContent = schema.description || groupKey;
@@ -572,6 +608,7 @@ function renderConfigForm() {
       host.append(renderObjectGroup(groupKey, schema));
     }
   });
+  updateConfigState();
 }
 
 async function loadStatus() {
@@ -1056,6 +1093,7 @@ async function loadCandidates() {
     return;
   }
   items.forEach((candidate) => {
+    const draftKey = JSON.stringify([candidate.profile_id, candidate.id, candidate.post_id]);
     const card = document.createElement("article");
     card.className = "candidate";
     const title = document.createElement("h3");
@@ -1064,7 +1102,13 @@ async function loadCandidates() {
     const statusText = candidate.status === "send_unknown" ? "发送状态未知，请人工核对" : "待审核";
     meta.textContent = `档案 ${candidate.profile_id || "—"} · 目标帖子 ${candidate.post_id} · 作者 UID ${candidate.post_author_uid || "未知"} · ${statusText} · ${candidate.reason || "AI 候选"}`;
     const editor = document.createElement("textarea");
-    editor.value = candidate.edited_text || candidate.generated_text;
+    const originalText = candidate.edited_text || candidate.generated_text || "";
+    editor.value = candidate.status === "pending" ? candidateDrafts.get(draftKey) ?? originalText : originalText;
+    editor.addEventListener("input", () => {
+      if (candidate.status !== "pending") return;
+      if (editor.value === originalText) candidateDrafts.delete(draftKey);
+      else candidateDrafts.set(draftKey, editor.value);
+    });
     editor.setAttribute("aria-label", `帖子 ${candidate.post_id} 的候选评论`);
     editor.readOnly = candidate.status === "send_unknown";
     const row = document.createElement("div");
@@ -1085,15 +1129,12 @@ async function loadCandidates() {
     }
     const approve = document.createElement("button");
     approve.type = "button";
-    approve.textContent = "批准";
+    approve.textContent = "转入评论审核";
     approve.addEventListener("click", () => candidateAction(approve, reject, candidate, async () => {
-      const simulated = Boolean(state.config?.proactive_feed?.dry_run);
       const editedText = editor.value;
       const confirmed = await confirmAction(
-        simulated
-          ? "当前为主动浏览模拟运行。确认保存这条批准结果？"
-          : `确认使用档案 ${candidate.profile_id} 将以下评论发送到帖子 ${candidate.post_id}？\n${editedText}`,
-        { confirmText: "批准" },
+        `确认使用档案 ${candidate.profile_id} 将以下候选转入统一评论审核？\n目标帖子 ${candidate.post_id}\n${editedText}\n此步骤不会发送评论，仍需在“评论审核”中核对账号并批准。`,
+        { confirmText: "转入评论审核" },
       );
       if (!confirmed) return false;
       nextRequest("candidates");
@@ -1101,6 +1142,7 @@ async function loadCandidates() {
         `feed/candidates/${encodeURIComponent(candidate.id)}/approve`,
         { edited_text: editedText, confirm: true },
       );
+      candidateDrafts.delete(draftKey);
       toast(result.result === "queued" ? "已转入统一评论审核，请核对账号后批准" : result.result === "dry_run" ? "模拟运行候选已批准" : result.result === "sent" || result.status === "sent" ? "候选已发送" : "请刷新候选状态并人工核对；发送结果未知时不能重发。");
       await loadCandidates();
       return true;
@@ -1112,6 +1154,7 @@ async function loadCandidates() {
     reject.addEventListener("click", () => candidateAction(approve, reject, candidate, async () => {
       nextRequest("candidates");
       await bridge.apiPost(`feed/candidates/${encodeURIComponent(candidate.id)}/reject`, {});
+      candidateDrafts.delete(draftKey);
       toast("候选已拒绝");
       await loadCandidates();
       return true;
@@ -1264,16 +1307,69 @@ async function initialLoad() {
 
 const publishing = createPublishing({ bridge, busy, confirmAction, metric, toast, formatTime, isUnloaded: () => state.unloaded });
 
-document.querySelectorAll(".tabs button").forEach((button) => {
-  button.addEventListener("click", async () => {
-    if (state.unloaded) return;
-    document.querySelectorAll(".tabs button").forEach((item) => item.classList.toggle("active", item === button));
-    document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("active", panel.id === button.dataset.tab));
-    if (button.dataset.tab !== "logs") disconnectSse();
-    try { await loadTab(button.dataset.tab); }
-    catch (error) { toast(`${button.textContent}加载失败：${error.message}`, "error"); }
+const tabs = [...document.querySelectorAll(".tabs button")];
+async function activateTab(button) {
+  if (state.unloaded) return;
+  const version = nextRequest("navigation");
+  const tabName = button.dataset.tab;
+  tabs.forEach((item) => {
+    const selected = item === button;
+    item.classList.toggle("active", selected);
+    item.setAttribute("aria-selected", String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    const panel = $(item.dataset.tab);
+    panel.classList.toggle("active", selected);
+    panel.hidden = !selected;
+  });
+  $("module-select").value = tabName;
+  if (tabName !== "logs") disconnectSse();
+  const feedback = $("panel-feedback");
+  feedback.hidden = false;
+  feedback.dataset.tone = "info";
+  $("retry-tab").hidden = true;
+  $("panel-message").textContent = `正在加载${button.textContent}…`;
+  if (tabName !== "sources") $(tabName).setAttribute("aria-busy", "true");
+  try {
+    await loadTab(tabName);
+    if (currentRequest("navigation", version)) feedback.hidden = true;
+  } catch (error) {
+    if (!currentRequest("navigation", version)) return;
+    $("panel-message").textContent = `${button.textContent}加载失败：${error.message}`;
+    feedback.dataset.tone = "error";
+    $("retry-tab").hidden = false;
+  } finally {
+    if (!state.unloaded && tabName !== "sources") $(tabName).setAttribute("aria-busy", "false");
+  }
+}
+tabs.forEach((button, index) => {
+  const tabName = button.dataset.tab;
+  button.id = `tab-${tabName}`;
+  button.setAttribute("role", "tab");
+  button.setAttribute("aria-controls", tabName);
+  button.setAttribute("aria-selected", String(index === 0));
+  button.tabIndex = index === 0 ? 0 : -1;
+  $(tabName).setAttribute("role", "tabpanel");
+  $(tabName).setAttribute("aria-labelledby", button.id);
+  $(tabName).tabIndex = 0;
+  $(tabName).hidden = index !== 0;
+  const option = document.createElement("option");
+  option.value = tabName;
+  option.textContent = button.textContent;
+  $("module-select").append(option);
+  button.addEventListener("click", () => activateTab(button));
+  button.addEventListener("keydown", (event) => {
+    const target = { ArrowDown: (index + 1) % tabs.length, ArrowUp: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    tabs.forEach((item, position) => { item.tabIndex = position === target ? 0 : -1; });
+    tabs[target].focus();
   });
 });
+$("module-select").addEventListener("change", () => {
+  const button = tabs.find((item) => item.dataset.tab === $("module-select").value);
+  button?.click();
+});
+$("retry-tab").addEventListener("click", () => busy($("retry-tab"), () => activateTab(tabs.find((button) => button.classList.contains("active")))));
 
 $("refresh-all").addEventListener("click", () => busy($("refresh-all"), async () => {
   const tabName = activeTab();
@@ -1294,27 +1390,51 @@ $("request-qr").addEventListener("click", () => loginAction("qr"));
 $("check-login").addEventListener("click", () => loginAction("check"));
 $("logout").addEventListener("click", () => loginAction("logout"));
 $("save-config").addEventListener("click", () => busy($("save-config"), async () => {
+  if (state.configBusy || !state.config) return;
+  if ($("sources").matches('[aria-busy="true"]')) { toast("浏览来源正在保存，请稍后再保存设置。"); return; }
   for (const control of $("config-form").querySelectorAll("input, select, textarea")) {
-    if (!control.reportValidity()) return;
+    if (!control.checkValidity()) {
+      for (let parent = control.parentNode; parent; parent = parent.parentNode) {
+        if (parent.tagName?.toLowerCase() === "details") parent.open = true;
+      }
+      control.reportValidity();
+      return;
+    }
   }
-  const result = await bridge.apiPost("config/save", state.config);
-  const changed = (result.changed || []).join("、") || "无变化";
-  $("config-result").textContent = `保存成功；已重载：${changed}`;
-  toast(changed === "无变化" ? "设置已保存，配置内容无变化" : "设置已保存并生效", "success");
-  await loadConfig();
-  await Promise.all([loadStatus(), publishing.loadStatus()]);
+  setConfigBusy(true);
+  try {
+    const result = await bridge.apiPost("config/save", structuredClone(state.config));
+    const changed = (result.changed || []).join("、") || "无变化";
+    $("config-result").textContent = `保存成功；已重载：${changed}`;
+    toast(changed === "无变化" ? "设置已保存，配置内容无变化" : "设置已保存并生效", "success");
+    await loadConfig();
+    await Promise.all([loadStatus(), publishing.loadStatus()]);
+  } finally { if (!state.unloaded) setConfigBusy(false); }
 }));
 $("restore-defaults").addEventListener("click", () => busy($("restore-defaults"), async () => {
+  if (state.configBusy) return;
+  if ($("sources").matches('[aria-busy="true"]')) { toast("浏览来源正在保存，请稍后再恢复默认。"); return; }
   const confirmed = await confirmAction(
-    "确认恢复插件默认配置？登录凭证将完整保留。",
+    "确认载入默认配置？当前未保存的设置将被替换，登录凭证完整保留。载入后仍需点击“校验并保存”才会生效。",
     { confirmText: "载入默认值" },
   );
   if (!confirmed) return;
-  const defaults = await bridge.apiGet("config/defaults");
-  state.config = defaults;
-  renderConfigForm();
-  $("config-result").textContent = "默认值已载入表单；点击“校验并保存”后生效。";
+  setConfigBusy(true);
+  try {
+    const defaults = await bridge.apiGet("config/defaults");
+    state.config = defaults;
+    renderConfigForm();
+    $("config-result").textContent = "默认值已载入表单；点击“校验并保存”后生效。";
+  } finally { if (!state.unloaded) setConfigBusy(false); }
 }));
+document.addEventListener("heybox:sources-saved", (event) => {
+  if (state.unloaded || !state.config || !state.savedConfig) return;
+  for (const config of [state.config, state.savedConfig]) {
+    config.proactive_feed ||= {};
+    Object.assign(config.proactive_feed, structuredClone(event.detail));
+  }
+  renderConfigForm();
+});
 $("search-events").addEventListener("click", () => busy($("search-events"), async () => {
   state.eventPage = 1;
   await loadEvents();
@@ -1458,10 +1578,16 @@ function dispose() {
   clearTimeout(state.reconnectTimer);
   clearTimeout(state.toastTimer);
   if (state.logRenderId !== null) cancelAnimationFrame(state.logRenderId);
+  if (state.confirmFocusFrame !== null) cancelAnimationFrame(state.confirmFocusFrame);
+  candidateDrafts.clear();
   disconnectSse();
 }
 window.addEventListener("pagehide", dispose);
-window.addEventListener("beforeunload", dispose);
+window.addEventListener("beforeunload", (event) => {
+  if (!state.configDirty && !candidateDrafts.size) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 initialLoad().catch((error) => {
   if (state.unloaded) return;

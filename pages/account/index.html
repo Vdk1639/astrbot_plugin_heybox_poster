@@ -9,9 +9,9 @@
     <link rel="stylesheet" href="./sources.css" />
   </head>
   <body>
+    <div id="page-content">
     <header class="hero">
       <div>
-        <p class="eyebrow">ASTRBOT HEYBOX POSTER</p>
         <h1>小黑盒冲浪板</h1>
         <p id="hero-summary">统一账号档案、发帖与评论、浏览来源和人工审核。</p>
       </div>
@@ -20,7 +20,10 @@
 
     <div id="alerts" class="alerts" aria-live="polite"></div>
 
+    <div class="workspace">
     <nav class="tabs" aria-label="管理模块">
+      <label class="mobile-navigation">管理模块<select id="module-select"></select></label>
+      <div class="tab-list" role="tablist" aria-label="管理模块" aria-orientation="vertical">
       <button data-tab="overview" class="active">状态总览</button>
       <button data-tab="login">扫码登录</button>
       <button data-tab="publishing">发布编辑</button>
@@ -32,9 +35,14 @@
       <button data-tab="feed">主动评论候选</button>
       <button data-tab="logs">运行日志</button>
       <button data-tab="storage">存储管理</button>
+      </div>
     </nav>
 
     <main>
+      <div id="panel-feedback" class="panel-feedback" role="status" hidden>
+        <span id="panel-message"></span>
+        <button id="retry-tab" class="secondary compact" type="button" hidden>重试加载</button>
+      </div>
       <section id="overview" class="panel active">
         <div id="status-cards" class="card-grid"></div>
         <div class="surface">
@@ -131,17 +139,18 @@
 
       <section id="settings" class="panel">
         <div class="surface">
-          <div class="section-heading">
+          <div class="section-heading settings-toolbar">
             <div>
               <h2>统一插件配置</h2>
               <p>AstrBot 原生插件设置与本页共享同一个配置对象；保存后按需热重载后台任务。</p>
+              <p id="config-unsaved" class="unsaved-hint" role="status" hidden>有未保存的修改</p>
             </div>
             <div class="button-row">
               <button id="save-config">校验并保存</button>
               <button id="restore-defaults" class="secondary">恢复默认</button>
             </div>
           </div>
-          <div id="config-form" class="config-form" aria-label="插件配置表单"></div>
+          <fieldset id="config-form" class="config-form" aria-label="插件配置表单"></fieldset>
           <p id="config-result" class="result"></p>
         </div>
       </section>
@@ -299,6 +308,8 @@
         </div>
       </section>
     </main>
+    </div>
+    </div>
 
     <div id="confirm-overlay" class="confirm-overlay" hidden>
       <section

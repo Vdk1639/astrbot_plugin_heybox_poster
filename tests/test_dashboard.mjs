@@ -48,6 +48,7 @@ class Element {
   }
   removeAttribute(name) { delete this.attributes[name]; delete this[name]; }
   addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
+  click() { return this.emit("click"); }
   async emit(name, extra = {}) {
     const event = { target: this, currentTarget: this, preventDefault() { this.defaultPrevented = true; }, ...extra };
     await Promise.all((this.listeners[name] || []).map((handler) => handler(event)));
@@ -56,6 +57,7 @@ class Element {
   select() {}
   setCustomValidity(message) { this.validationMessage = message; }
   reportValidity() { return !this.validationMessage; }
+  checkValidity() { return this.reportValidity(); }
   matches(selector) {
     const not = selector.match(/:not\(([^)]+)\)/);
     if (not && this.matches(not[1])) return false;
@@ -93,6 +95,7 @@ function dom() {
   document.querySelectorAll = (selector) => document.root.querySelectorAll(selector);
   document.querySelector = (selector) => document.root.querySelector(selector);
   document.addEventListener = (name, handler) => (document.listeners[name] ||= []).push(handler);
+  document.dispatchEvent = (event) => { for (const handler of document.listeners[event.type] || []) handler(event); return true; };
   const stack = [document.root];
   for (const token of html.match(/<[^>]+>|[^<]+/g)) {
     if (token.startsWith("<!")) continue;
@@ -163,6 +166,7 @@ async function page(options = {}) {
     location: { reload: () => { mock.reloaded = true; } },
   };
   const context = vm.createContext({ window, document, Node: Element, navigator: {}, console, structuredClone, queueMicrotask,
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     setTimeout: (fn) => schedule(fn), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn) => schedule(fn, true), clearInterval: (id) => timers.delete(id),
     requestAnimationFrame: (fn) => schedule(fn), cancelAnimationFrame: (id) => timers.delete(id),
@@ -533,7 +537,7 @@ await test("event filters, logs, diagnostics and storage keep adapter API contra
   assert.deepEqual(p.posts()[0], { method: "POST", path: "storage/cleanup", body: { confirm: true } });
 });
 
-await test("source save keeps other config groups and cancels delayed reload on unload", async () => {
+await test("source save keeps other config groups and never schedules a reload", async () => {
   const p = await page(); await p.topics.loadSources();
   const checkbox = p.$("fallback-source-list").querySelector('input[data-fallback-source="pc_game"]');
   checkbox.checked = true; await checkbox.emit("change");
@@ -834,6 +838,170 @@ await test("unrecorded users do not appear as fully evaluated zero risk", async 
   await p.trigger("event-mode", "change");
   assert.match(p.$("event-table").textContent, /无风险档案（不表示已评估全部事件）/);
   assert.doesNotMatch(p.$("event-table").textContent, /0 分 · 正常/);
+});
+
+await test("module navigation supports manual keyboard activation and the mobile selector", async () => {
+  const p = await page();
+  const tabs = p.document.querySelectorAll(".tabs button");
+  assert.equal(tabs[0].attributes["aria-selected"], "true");
+  assert.equal(tabs[0].attributes["aria-controls"], "overview");
+  assert(p.$("login").hidden);
+  await tabs[0].emit("keydown", { key: "ArrowUp" });
+  assert.equal(p.document.activeElement, tabs.at(-1));
+  assert.equal(tabs.at(-1).tabIndex, 0);
+  assert(!p.$("overview").hidden);
+  await tabs.at(-1).emit("keydown", { key: "Home" });
+  assert.equal(p.document.activeElement, tabs[0]);
+  p.$("module-select").value = "logs";
+  await p.trigger("module-select", "change");
+  assert(!p.$("logs").hidden); assert(p.$("overview").hidden);
+  assert.equal(tabs.find((button) => button.dataset.tab === "logs").attributes["aria-selected"], "true");
+  assert(p.calls.some((call) => call.method === "SSE"));
+});
+
+await test("navigation failures persist for retry and late failures cannot replace another module", async () => {
+  const p = await page(); const old = deferred();
+  p.mock.get = (path) => path === "storage" ? old.promise : undefined;
+  const first = p.tab("storage"); await flush();
+  assert.equal(p.$("storage").attributes["aria-busy"], "true");
+  await p.tab("login"); old.reject(new Error("旧请求失败")); await first;
+  assert(p.$("panel-feedback").hidden);
+  p.mock.get = (path) => { if (path === "storage") throw new Error("临时离线"); };
+  await p.tab("storage");
+  assert.match(p.$("panel-message").textContent, /临时离线/);
+  assert(!p.$("retry-tab").hidden);
+  p.mock.get = null; await p.trigger("retry-tab");
+  assert(p.$("panel-feedback").hidden);
+  assert.equal(p.$("storage").attributes["aria-busy"], "false");
+});
+
+await test("settings show unsaved state, lock the whole form during save and retain drafts on failure", async () => {
+  const p = await page(); const pending = deferred();
+  const name = p.$("config-form").querySelector('input[data-config-key="display_name"]');
+  name.value = "未保存的名称"; await name.emit("input");
+  assert(!p.$("config-unsaved").hidden);
+  p.mock.post = (path) => path === "config/save" ? pending.promise : undefined;
+  const save = p.trigger("save-config"); await flush();
+  assert(p.$("config-form").disabled); assert(p.$("restore-defaults").disabled);
+  assert.equal(p.$("save-config").attributes["aria-busy"], "true");
+  pending.reject(new Error("保存失败")); await save;
+  assert(!p.$("config-form").disabled); assert(!p.$("restore-defaults").disabled);
+  assert.equal(name.value, "未保存的名称"); assert(p.app.state.configDirty);
+  name.value = config.profiles[0].display_name; await name.emit("input");
+  assert(p.$("config-unsaved").hidden);
+});
+
+await test("a cancelled unload leaves authentication, timers and future actions usable", async () => {
+  const p = await page();
+  const name = p.$("config-form").querySelector('input[data-config-key="display_name"]');
+  name.value = "草稿"; await name.emit("input");
+  let warned = false; p.lifecycle("beforeunload", { preventDefault() { warned = true; } });
+  assert(warned); assert(!p.app.state.unloaded);
+  await p.tab("login"); assert.match(p.$("login-facts").textContent, /logged_in/);
+  await p.trigger("check-login"); assert.equal(p.posts().at(-1).path, "auth/check");
+});
+
+await test("source saves synchronize in place and preserve settings and publishing drafts", async () => {
+  const p = await page(); await p.topics.loadSources();
+  p.$("publish-text").value = "尚未发布的正文";
+  const name = p.$("config-form").querySelector('input[data-config-key="display_name"]');
+  name.value = "本地档案草稿"; await name.emit("input");
+  const pc = p.$("fallback-source-list").querySelector('input[data-fallback-source="pc_game"]');
+  pc.checked = true; await pc.emit("change");
+  p.mock.post = () => ({ changed: ["proactive_feed"] });
+  await p.topics.saveFallbackSources();
+  assert(!p.mock.reloaded);
+  assert.equal(p.$("publish-text").value, "尚未发布的正文");
+  assert.equal(p.app.state.config.profiles[0].display_name, "本地档案草稿");
+  assert.deepEqual(plain(p.app.state.config.proactive_feed.fallback_sources), ["pc_game"]);
+  assert.deepEqual(plain(p.app.state.savedConfig.proactive_feed.fallback_sources), ["pc_game"]);
+  assert(p.app.state.configDirty); assert(!p.$("save-fallback-sources").disabled);
+  assert(p.$("fallback-source-list").querySelector('input[data-fallback-source="pc_game"]').checked);
+  assert.equal(p.timers.size, 0);
+  p.$("config-form").disabled = true;
+  await p.topics.saveFallbackSources(); assert.equal(p.posts().length, 1);
+});
+
+await test("candidate refresh preserves other edited comments and confirms review without promising a send", async () => {
+  const p = await page(); let items = [1, 2].map((id) => ({ id, profile_id: "second", post_id: String(id), status: "pending", generated_text: `原文 ${id}` }));
+  p.mock.get = (path, query) => path === "feed/candidates" ? { items: query.status === "pending" ? items : [] } : undefined;
+  p.mock.post = (path) => { if (path.endsWith("/reject")) { items = items.filter((item) => item.id !== 1); return {}; } };
+  await p.tab("feed");
+  let cards = p.$("candidate-list").children;
+  const editor = cards[1].querySelector("textarea"); editor.value = "第二条手工修改"; await editor.emit("input");
+  await cards[0].querySelectorAll("button")[1].emit("click");
+  await p.tab("overview"); await p.tab("feed");
+  cards = p.$("candidate-list").children;
+  assert.equal(cards[0].querySelector("textarea").value, "第二条手工修改");
+  const approve = cards[0].querySelector("button").emit("click"); await flush();
+  assert.match(p.$("confirm-message").textContent, /第二条手工修改/);
+  assert.match(p.$("confirm-message").textContent, /此步骤不会发送评论/);
+  await p.trigger("confirm-cancel"); await approve;
+  assert.equal(p.posts().length, 1);
+});
+
+await test("navigation preserves the source save lock until its transaction finishes", async () => {
+  const p = await page(); await p.topics.loadSources(); const response = deferred();
+  p.mock.post = (path) => path === "config/save" ? response.promise : undefined;
+  const sourceSave = p.topics.saveFallbackSources(); await flush();
+  assert.equal(p.$("sources").attributes["aria-busy"], "true");
+  await p.tab("settings"); await p.tab("sources");
+  assert.equal(p.$("sources").attributes["aria-busy"], "true");
+  await p.trigger("save-config"); assert.equal(p.posts().length, 1);
+  response.resolve({ changed: ["proactive_feed"] }); await sourceSave;
+  assert.equal(p.$("sources").attributes["aria-busy"], "false");
+});
+
+await test("source changes persist in settings after a profile switch during the save response", async () => {
+  const p = await page(); await p.topics.loadSources(); const response = deferred();
+  const pc = p.$("fallback-source-list").querySelector('input[data-fallback-source="pc_game"]');
+  pc.checked = true; await pc.emit("change");
+  let saved = plain(config);
+  p.mock.get = (path) => path === "config" ? plain(saved) : undefined;
+  p.mock.post = async (path, body) => {
+    if (path === "config/save") { await response.promise; saved = plain(body); return { changed: ["proactive_feed"] }; }
+  };
+  const sourceSave = p.topics.saveFallbackSources(); await flush();
+  await p.tab("login"); p.$("login-profile").value = "second"; await p.trigger("login-profile", "change");
+  response.resolve(); await sourceSave;
+  assert.deepEqual(plain(p.app.state.config.proactive_feed.fallback_sources), ["pc_game"]);
+  assert.deepEqual(plain(p.app.state.savedConfig.proactive_feed.fallback_sources), ["pc_game"]);
+  await p.trigger("save-config");
+  assert.deepEqual(p.posts().at(-1).body.proactive_feed.fallback_sources, ["pc_game"]);
+});
+
+await test("invalid numeric settings remain editable and saving opens their collapsed group", async () => {
+  const p = await page();
+  const control = p.$("config-form").querySelector('input[data-config-key="watch_score"]');
+  let group = control.parentNode; while (group.tagName !== "details") group = group.parentNode;
+  control.value = ""; await control.emit("input"); group.open = false;
+  assert.equal(control.attributes["aria-invalid"], "true");
+  await p.trigger("save-config"); assert(group.open); assert.equal(p.posts().length, 0);
+  control.value = "20"; await control.emit("input");
+  assert.equal(control.attributes["aria-invalid"], undefined); assert(control.checkValidity());
+});
+
+await test("publishing defaults update untouched fields and preserve independent user edits", async () => {
+  const p = await page(); const updated = plain(config);
+  updated.publishing.default_topic_ids = "50"; updated.publishing.view_limit = 3;
+  p.app.publishing.configure(updated);
+  assert.equal(p.$("post-topics").value, "50"); assert.equal(p.$("post-view-limit").value, "3");
+  p.$("post-topics").value = "";
+  updated.publishing.default_topic_ids = "60"; updated.publishing.view_limit = 2;
+  p.app.publishing.configure(updated);
+  assert.equal(p.$("post-topics").value, ""); assert.equal(p.$("post-view-limit").value, "2");
+  p.$("post-view-limit").value = "1"; updated.publishing.view_limit = 3;
+  p.app.publishing.configure(updated); assert.equal(p.$("post-view-limit").value, "1");
+});
+
+await test("confirmations isolate the background and cancel on Escape without posting", async () => {
+  const p = await page(); await p.tab("login");
+  p.$("logout").focus(); const logout = p.$("logout").emit("click"); await flush();
+  assert(p.$("page-content").inert); assert.equal(p.document.activeElement, p.$("confirm-cancel"));
+  for (const handler of p.document.listeners.keydown) handler({ key: "Escape" });
+  await logout; assert(!p.$("page-content").inert); assert.equal(p.posts().length, 0);
+  const frame = p.app.state.confirmFocusFrame; assert(frame); p.timers.get(frame).callback(); p.timers.delete(frame);
+  assert.equal(p.document.activeElement, p.$("logout"));
 });
 
 console.log(`${passed} dashboard checks passed`);

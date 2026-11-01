@@ -15,6 +15,7 @@ const summaryNamesNode = document.getElementById("source-summary-names");
 const summaryCountNode = document.getElementById("source-summary-count");
 const sourceModeBadge = document.getElementById("source-mode-badge");
 const profileSelect = document.getElementById("login-profile");
+const sourcesPanel = document.getElementById("sources");
 const sourcesTab = document.querySelector('.tabs button[data-tab="sources"]');
 const MAX_SELECTED_TOPICS = 20;
 
@@ -41,7 +42,8 @@ let draftTopicIds = new Set();
 let unloaded = false;
 let probeRevision = 0;
 let configRevision = 0;
-let reloadTimer = null;
+let loadingConfig = false;
+let probing = false;
 let saving = false;
 
 function selectedProfile() {
@@ -55,6 +57,24 @@ function configuredTopicIds() {
 function configuredFallbackSources() {
   const values = currentConfig?.proactive_feed?.fallback_sources;
   return Array.isArray(values) && values.length ? values.map(String) : ["all"];
+}
+
+function updateControls() {
+  if (unloaded) return;
+  const pending = loadingConfig || probing || saving;
+  const ready = Boolean(currentConfig) && !pending;
+  const realTopicsEnabled = configuredTopicIds().length > 0;
+  probeButton.disabled = pending;
+  editButton.disabled = !ready;
+  saveTopicButton.disabled = !ready || !lastProbe || lastProbeProfile !== selectedProfile()
+    || draftTopicIds.size > MAX_SELECTED_TOPICS;
+  saveFallbackButton.disabled = !ready || realTopicsEnabled || !checkedFallbackSources().length;
+  cancelTopicButton.disabled = saving;
+  searchNode.disabled = !ready;
+  listNode.querySelectorAll('input[data-topic-id]').forEach((input) => { input.disabled = !ready; });
+  fallbackListNode.querySelectorAll('input[data-fallback-source]').forEach((input) => {
+    input.disabled = !ready || realTopicsEnabled;
+  });
 }
 
 function setStatus(message, tone = "") {
@@ -100,7 +120,7 @@ function renderProbeStatus() {
 
 function updateDraftState() {
   selectionCountNode.textContent = `${draftTopicIds.size} / ${MAX_SELECTED_TOPICS}`;
-  saveTopicButton.disabled = !lastProbe || draftTopicIds.size > MAX_SELECTED_TOPICS;
+  updateControls();
   if (draftTopicIds.size > MAX_SELECTED_TOPICS) {
     setStatus(`最多选择 ${MAX_SELECTED_TOPICS} 个真实分区；当前已选择 ${draftTopicIds.size} 个。`, "error");
     return;
@@ -203,8 +223,7 @@ function renderFallbackSources() {
         const all = fallbackListNode.querySelector('input[data-fallback-source="all"]');
         if (all) all.checked = false;
       }
-      const checked = checkedFallbackSources();
-      saveFallbackButton.disabled = realTopicsEnabled || checked.length === 0;
+      updateControls();
     });
     const text = document.createElement("span");
     text.textContent = label;
@@ -212,7 +231,7 @@ function renderFallbackSources() {
     fallbackListNode.append(row);
   });
 
-  saveFallbackButton.disabled = realTopicsEnabled;
+  updateControls();
   if (realTopicsEnabled) {
     fallbackStatusNode.textContent =
       "已启用真实分区浏览，此项当前不生效。若本轮全部真实分区请求失败，将自动使用这里已保存的分类回退。";
@@ -232,20 +251,31 @@ function checkedFallbackSources() {
 }
 
 async function loadSourceConfig() {
+  if (unloaded || saving || probing) return false;
   const version = ++configRevision;
-  const config = await bridge.apiGet("config");
-  if (unloaded || version !== configRevision) return false;
-  currentConfig = config;
-  renderSummary();
-  return true;
+  loadingConfig = true;
+  currentConfig = null;
+  updateControls();
+  try {
+    const config = await bridge.apiGet("config");
+    if (unloaded || version !== configRevision) return false;
+    currentConfig = config;
+    renderSummary();
+    return true;
+  } finally {
+    if (!unloaded && version === configRevision) {
+      loadingConfig = false;
+      updateControls();
+    }
+  }
 }
 
 async function probeTopics({ openEditor = false } = {}) {
-  if (unloaded) return;
+  if (unloaded || saving || loadingConfig || probing) return;
   const version = ++probeRevision;
   const profile = selectedProfile();
-  probeButton.disabled = true;
-  editButton.disabled = true;
+  probing = true;
+  updateControls();
   setStatus("正在只读探测真实分区和帖子流……");
   try {
     const result = await bridge.apiGet("feed/topics/probe", {
@@ -270,13 +300,14 @@ async function probeTopics({ openEditor = false } = {}) {
     setStatus(`真实分区探测失败：${error.message}`, "error");
   } finally {
     if (!unloaded && version === probeRevision) {
-      probeButton.disabled = false;
-      editButton.disabled = false;
+      probing = false;
+      updateControls();
     }
   }
 }
 
 async function editTopics() {
+  if (unloaded || saving || loadingConfig || probing || !currentConfig) return;
   if (!lastProbe || lastProbeProfile !== selectedProfile()) {
     await probeTopics({ openEditor: true });
     return;
@@ -287,58 +318,79 @@ async function editTopics() {
   searchNode.focus();
 }
 
+async function saveSourceConfig(changes) {
+  if (document.getElementById("config-form")?.disabled) {
+    throw new Error("设置正在保存或恢复，请等待完成后再保存浏览来源。");
+  }
+  const version = ++configRevision;
+  saving = true;
+  sourcesPanel.setAttribute("aria-busy", "true");
+  updateControls();
+  try {
+    const config = await bridge.apiGet("config");
+    if (unloaded || version !== configRevision) return false;
+    Object.assign(config.proactive_feed ||= {}, changes);
+    await bridge.apiPost("config/save", config);
+    if (!unloaded) document.dispatchEvent(new CustomEvent("heybox:sources-saved", { detail: changes }));
+    if (unloaded || version !== configRevision) return false;
+    currentConfig = config;
+    renderSummary();
+    return true;
+  } catch (error) {
+    if (!unloaded && version === configRevision) throw error;
+    return false;
+  } finally {
+    saving = false;
+    if (!unloaded) {
+      sourcesPanel.setAttribute("aria-busy", "false");
+      updateControls();
+      if (version !== configRevision && sourcesPanel.classList.contains("active")) {
+        loadSources().catch((error) => setStatus(`浏览来源加载失败：${error.message}`, "error"));
+      }
+    }
+  }
+}
+
 async function saveTopicSelection() {
-  if (unloaded || saving || !lastProbe || lastProbeProfile !== selectedProfile()) return;
+  if (unloaded || saving || loadingConfig || probing || !currentConfig
+    || !lastProbe || lastProbeProfile !== selectedProfile()) return;
   if (draftTopicIds.size > MAX_SELECTED_TOPICS) {
     updateDraftState();
     return;
   }
-  saveTopicButton.disabled = true;
-  saving = true;
   const topicIds = [...draftTopicIds];
   setStatus("正在保存真实分区选择……");
   try {
-    const config = await bridge.apiGet("config");
-    config.proactive_feed ||= {};
-    config.proactive_feed.topic_ids = topicIds;
-    await bridge.apiPost("config/save", config);
-    setStatus(`已保存 ${topicIds.length} 个真实分区。页面将刷新以同步全部设置状态。`, "success");
-    reloadTimer = setTimeout(() => window.location.reload(), 500);
+    if (!await saveSourceConfig({ topic_ids: topicIds }) || unloaded) return;
+    draftTopicIds = new Set(configuredTopicIds());
+    renderTopics();
+    editorNode.hidden = true;
+    editButton.focus();
+    setStatus(`已保存 ${topicIds.length} 个真实分区。`, "success");
   } catch (error) {
     if (unloaded) return;
     setStatus(`保存真实分区失败：${error.message}`, "error");
-    saveTopicButton.disabled = false;
-  } finally {
-    saving = false;
   }
 }
 
 async function saveFallbackSources() {
-  if (unloaded || saving) return;
+  if (unloaded || saving || loadingConfig || probing || !currentConfig) return;
   const selected = checkedFallbackSources();
   if (!selected.length || configuredTopicIds().length) return;
-  saveFallbackButton.disabled = true;
-  saving = true;
   fallbackStatusNode.textContent = "正在保存回退推荐流分类……";
   try {
-    const config = await bridge.apiGet("config");
-    config.proactive_feed ||= {};
-    config.proactive_feed.fallback_sources = selected;
-    await bridge.apiPost("config/save", config);
-    fallbackStatusNode.textContent = "回退推荐流分类已保存。页面将刷新以同步全部设置状态。";
+    if (!await saveSourceConfig({ fallback_sources: selected }) || unloaded) return;
+    fallbackStatusNode.textContent = `回退推荐流分类已保存。${fallbackStatusNode.textContent}`;
     fallbackStatusNode.dataset.tone = "success";
-    reloadTimer = setTimeout(() => window.location.reload(), 500);
   } catch (error) {
     if (unloaded) return;
     fallbackStatusNode.textContent = `保存回退分类失败：${error.message}`;
     fallbackStatusNode.dataset.tone = "error";
-    saveFallbackButton.disabled = false;
-  } finally {
-    saving = false;
   }
 }
 
 async function loadSources({ probe = true } = {}) {
+  if (unloaded || saving) return;
   await bridge.ready();
   if (!await loadSourceConfig()) return;
   if (probe && (!lastProbe || lastProbeProfile !== selectedProfile())) {
@@ -350,6 +402,7 @@ probeButton?.addEventListener("click", () => probeTopics());
 editButton?.addEventListener("click", editTopics);
 saveTopicButton?.addEventListener("click", saveTopicSelection);
 cancelTopicButton?.addEventListener("click", () => {
+  if (unloaded || saving) return;
   editorNode.hidden = true;
   draftTopicIds = new Set(configuredTopicIds());
 });
@@ -361,14 +414,17 @@ sourcesTab?.addEventListener("click", () => {
   );
 });
 profileSelect?.addEventListener("change", () => {
+  if (unloaded) return;
   probeRevision++;
   configRevision++;
+  loadingConfig = false;
+  probing = false;
+  currentConfig = null;
   lastProbe = null;
   lastProbeProfile = "";
   editorNode.hidden = true;
-  probeButton.disabled = false;
-  editButton.disabled = false;
-  if (document.getElementById("sources")?.classList.contains("active")) {
+  updateControls();
+  if (sourcesPanel.classList.contains("active")) {
     loadSources({ probe: true }).catch((error) =>
       setStatus(`浏览来源加载失败：${error.message}`, "error"),
     );
@@ -376,10 +432,10 @@ profileSelect?.addEventListener("change", () => {
 });
 
 function dispose() {
+  sourcesPanel.setAttribute("aria-busy", "false");
   unloaded = true;
   probeRevision++;
   configRevision++;
-  clearTimeout(reloadTimer);
 }
+updateControls();
 window.addEventListener("pagehide", dispose);
-window.addEventListener("beforeunload", dispose);
