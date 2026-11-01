@@ -1,14 +1,14 @@
 # 验证与待办
 
-版本文件为 v0.8.1；当前 `dev` 已完成发帖与评论整合、通知限额、事件聚合与风险处置。实现范围与配置见 [README](README.md)，变更见 [CHANGELOG](CHANGELOG.md)。本清单不把离线测试通过视为真实账号或宿主验收完成。
+当前正式版本为 v0.8.1，已完成发帖与评论整合、通知限额、事件聚合与风险处置。用户于 2026-11-01 确认实机测试通过；实现范围与配置见 [README](README.md)，变更见 [CHANGELOG](CHANGELOG.md)。下列清单保留供后续回归，不代表本次实机测试的逐项记录。
 
-## 整合发布前
+## 持续回归清单
 
 - [ ] 在目标 AstrBot 版本安装单个插件，验证“小黑盒冲浪板”机器人类型 `heybox_community` 的注册、启停、卸载和配置热重载。
 - [ ] 验证多档案分别扫码、登录检查、换号失败回滚和登出；机器人 `profile_id` 与档案一致，不与旧适配器重复轮询同一账号。
 - [ ] 确认升级整合版后旧顶层配置被忽略，并可通过面板重新登录和保存现行配置。
-- [ ] 通过三组离线检查：`python -m unittest discover -s tests -v`、`python -m pytest adapter_tests -q --asyncio-mode=auto`、`node tests/test_dashboard.mjs`。
-- [ ] 由 CI 维护任务接入统一面板与适配器测试；旧 `tests/test_account_page.mjs` 依赖旧 DOM，先迁移仍适用的轮询恢复等覆盖，再移除。
+- [x] 通过三组离线检查：`python -m unittest discover -s tests -v`、`python -m pytest adapter_tests -q --asyncio-mode=auto`、`node tests/test_dashboard.mjs`。
+- [x] CI 已接入统一面板与适配器测试；旧 `tests/test_account_page.mjs` 依赖旧 DOM，保留作参考，移除前仍需核对轮询恢复等覆盖。
 - [ ] 在真实 Dashboard 核对鉴权、日志 SSE、存储预览/确认清理、无凭据输出、未登录请求拒绝，以及移动端与键盘操作。
 
 ## 需真实账号授权的验收
