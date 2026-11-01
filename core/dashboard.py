@@ -13,6 +13,7 @@ class Dashboard(WebApiController):
         super().register(context)
         routes = (
             ("status", self.publishing_status, ["GET"]),
+            ("topics", self.topics, ["GET"]),
             ("reviews", self.reviews, ["GET"]),
             ("submit", self.submit, ["POST"]),
             ("reviews/<review_id>/approve", self.approve, ["POST"]),
@@ -43,6 +44,26 @@ class Dashboard(WebApiController):
             )})
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
+
+    async def topics(self):
+        if response := self._unauthorized():
+            return response
+        try:
+            keyword = str(request.query.get("keyword", "")).strip()
+            if not 1 <= len(keyword) <= 100:
+                raise ValueError("请输入 1–100 字的社区名称")
+            profile_id = self.publisher.profile_id(str(request.query.get("profile_id", "")))
+            self.publisher.credentials(profile_id)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        try:
+            client = self.publisher.client_factory(profile_id)
+            items = await client.search_topics(keyword, limit=20)
+            return json_response({"profile_id": profile_id, "items": [
+                {"topic_id": str(item["topic_id"]), "name": str(item["name"])} for item in items
+            ]})
+        except Exception:
+            return error_response("社区搜索失败，请检查所选档案登录状态后重试", status_code=502)
 
     async def submit(self):
         if response := self._unauthorized():

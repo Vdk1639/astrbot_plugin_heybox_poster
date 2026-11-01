@@ -11,7 +11,8 @@
         "max": 100000
       },
       "default_topic_ids": {
-        "description": "默认社区/话题 ID，多个用英文逗号分隔；发帖时没指定话题就用它",
+        "description": "默认发帖社区/话题",
+        "hint": "管理页可按名称搜索并选择多个社区；发帖时未指定话题使用此设置",
         "type": "string",
         "default": ""
       },

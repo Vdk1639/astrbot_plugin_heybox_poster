@@ -124,6 +124,8 @@ const schema = {
 schema.reply = actualSchema.reply;
 schema.risk = actualSchema.risk;
 schema.publishing.items.comment_daily_limit = actualSchema.publishing.items.comment_daily_limit;
+schema.publishing.items.view_limit = actualSchema.publishing.items.view_limit;
+schema.publishing.items.default_topic_ids = actualSchema.publishing.items.default_topic_ids;
 function review(kind, status = "pending", id = 1) {
   return { id, kind, profile_id: "second", account_id: "uid-2", payload: { title: "<img src=x onerror=alert(1)>", text: "<script>unsafe()</script>", post_id: "post-42", parent_comment_id: "parent-4", root_comment_id: "root-2", topic_ids: ["42"], mode: "dynamic", view_limit: 2 }, source: "proactive", status, created_at: 1700000000 };
 }
@@ -384,6 +386,107 @@ await test("settings save the shared profile schema and validate controls", asyn
   assert.equal(p.posts()[0].body.profiles[0].display_name, "修改后的档案");
   assert.equal(p.posts()[0].body.publishing.comment_review_required, true);
   assert.match(p.$("config-result").textContent, /publishing/);
+});
+
+await test("post visibility settings use labelled choices and save numeric values", async () => {
+  const p = await page();
+  let saved = plain(config);
+  p.mock.get = (path) => path === "config" ? plain(saved) : undefined;
+  p.mock.post = (path, body) => {
+    if (path === "config/save") { saved = plain(body); return { changed: ["publishing"] }; }
+  };
+  const control = () => p.$("config-form").querySelector('select[data-config-key="view_limit"]');
+  assert(control());
+  assert.equal(control().value, "2");
+  assert.deepEqual(control().children.map((option) => [option.value, option.textContent]),
+    [["1", "公开可见"], ["2", "粉丝可见"], ["3", "仅自己可见"]]);
+  for (const value of [1, 3, 2]) {
+    control().value = String(value); await control().emit("change");
+    await p.trigger("save-config");
+    assert.equal(p.posts().at(-1).body.publishing.view_limit, value);
+    assert.equal(control().value, String(value));
+  }
+});
+
+await test("default communities search by name, keep existing IDs and save multiple removable selections", async () => {
+  const p = await page();
+  let saved = plain(config);
+  p.mock.get = (path) => path === "config" ? plain(saved) : path === "publishing/topics" ? { items: [
+    { topic_id: "42", name: "原社区" }, { topic_id: "43", name: "新社区" },
+    { topic_id: "43", name: "重复结果" }, { topic_id: "44", name: "<img src=x>" },
+  ] } : undefined;
+  p.mock.post = (path, body) => { if (path === "config/save") { saved = plain(body); return { changed: ["publishing"] }; } };
+  const form = p.$("config-form");
+  const input = form.querySelector('input[data-config-key="default_topic_search"]');
+  const choices = form.querySelector('select[data-config-key="default_topic_ids"]');
+  const search = form.querySelectorAll("button").find((b) => b.textContent === "搜索社区");
+  const remove = (name) => p.$("config-form").querySelectorAll("button").find((b) => b.attributes["aria-label"] === `移除默认社区：${name}`);
+  assert(choices.disabled); assert(remove("已保存社区（ID 42）"));
+  assert(!p.calls.some((call) => call.path === "publishing/topics"));
+  input.value = "  社区  "; await search.emit("click");
+  assert.deepEqual(p.calls.find((call) => call.path === "publishing/topics").query, { profile_id: "second", keyword: "社区" });
+  assert.deepEqual(choices.options.map((o) => o.textContent), ["请选择社区，可添加多个", "原社区", "新社区", "<img src=x>"]);
+  assert(choices.options.find((o) => o.value === "42").disabled);
+  assert.equal(p.app.state.config.publishing.default_topic_ids, "42");
+  for (const id of ["43", "44", "43"]) { choices.value = id; await choices.emit("change"); }
+  assert.equal(p.app.state.config.publishing.default_topic_ids, "42,43,44");
+  assert.equal(form.querySelectorAll("img").length, 0);
+  await remove("原社区").emit("click");
+  assert(!choices.options.find((o) => o.value === "42").disabled);
+  assert.equal(p.posts().length, 0);
+  await p.trigger("save-config");
+  assert.equal(saved.publishing.default_topic_ids, "43,44");
+  assert(remove("新社区")); assert(remove("<img src=x>"));
+  await remove("新社区").emit("click"); await remove("<img src=x>").emit("click");
+  await p.trigger("save-config"); assert.equal(saved.publishing.default_topic_ids, "");
+});
+
+await test("empty, failed and retried community lookups never clear saved selections", async () => {
+  const p = await page(), form = p.$("config-form");
+  const input = form.querySelector('input[data-config-key="default_topic_search"]');
+  const choices = form.querySelector('select[data-config-key="default_topic_ids"]');
+  const search = form.querySelectorAll("button").find((b) => b.textContent === "搜索社区");
+  await search.emit("click");
+  assert(!p.calls.some((call) => call.path === "publishing/topics"));
+  input.value = "不存在"; await input.emit("keydown", { key: "Enter" });
+  assert(choices.disabled); assert.match(form.textContent, /未找到社区/);
+  p.mock.get = (path) => { if (path === "publishing/topics") throw new Error("offline"); };
+  await search.emit("click"); assert(!search.disabled); assert.match(form.textContent, /搜索失败/);
+  assert.equal(p.app.state.config.publishing.default_topic_ids, "42");
+  p.mock.get = (path) => path === "publishing/topics" ? { items: [{ topic_id: "43", name: "恢复的社区" }] } : undefined;
+  await search.emit("click"); assert(!choices.disabled);
+  choices.value = "43"; await choices.emit("change");
+  assert.equal(p.app.state.config.publishing.default_topic_ids, "42,43");
+  assert.equal(p.posts().length, 0);
+});
+
+await test("late community lookups are ignored after config reload, profile changes and unload", async () => {
+  for (const action of ["reload", "profile", "unload"]) {
+    const p = await page(), response = deferred(), form = p.$("config-form");
+    const input = form.querySelector('input[data-config-key="default_topic_search"]');
+    const choices = form.querySelector('select[data-config-key="default_topic_ids"]');
+    const search = form.querySelectorAll("button").find((b) => b.textContent === "搜索社区");
+    p.mock.get = (path) => path === "publishing/topics" ? response.promise : undefined;
+    input.value = "社区"; const pending = search.emit("click"); await flush();
+    if (action === "reload") await p.app.loadConfig();
+    if (action === "profile") p.app.state.config.publishing.profile_id = "default";
+    if (action === "unload") p.lifecycle("pagehide");
+    response.resolve({ items: [{ topic_id: "99", name: "迟到社区" }] }); await pending;
+    assert(!p.app.state.topicNames.has("99"));
+    assert(!choices.options.some((o) => o.value === "99"));
+    assert.equal(p.app.state.config.publishing.default_topic_ids, "42");
+  }
+});
+
+await test("community choices from an earlier publishing profile cannot be added", async () => {
+  const p = await page(), form = p.$("config-form");
+  p.mock.get = (path) => path === "publishing/topics" ? { items: [{ topic_id: "99", name: "社区" }] } : undefined;
+  form.querySelector('input[data-config-key="default_topic_search"]').value = "社区";
+  await form.querySelectorAll("button").find((b) => b.textContent === "搜索社区").emit("click");
+  p.app.state.config.publishing.profile_id = "default";
+  const choices = form.querySelector('select[data-config-key="default_topic_ids"]');
+  choices.value = "99"; await choices.emit("change");
+  assert(choices.disabled); assert.equal(p.app.state.config.publishing.default_topic_ids, "42");
 });
 
 await test("settings retain both direct-reply preferences across render save and reload", async () => {

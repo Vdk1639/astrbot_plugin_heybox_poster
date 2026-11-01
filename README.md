@@ -142,7 +142,7 @@
 | `publishing.dry_run` | `true` | 全局发布与删除模拟开关 |
 | `publishing.post_review_required` | `true` | 帖子先提交审核 |
 | `publishing.comment_review_required` | `true` | 手动评论和原生评论先提交审核 |
-| `publishing.default_topic_ids` | 空字符串 | 默认话题 ID，多个用英文逗号分隔 |
+| `publishing.default_topic_ids` | 空字符串 | 管理页按名称搜索后下拉选择，支持多个；底层仍保存逗号分隔的 ID |
 | `publishing.view_limit` | `2` | `1` 公开 / `2` 粉丝可见 / `3` 仅自己可见 |
 | `publishing.allowed_users` | `[]` | 手动指令与工具的写权限；留空仅管理员 |
 | `publishing.cooldown_seconds` | `60` | 账号实际发送间隔；手动发帖另有发送者冷却 |
@@ -152,6 +152,8 @@
 | `publishing.outbox_dedup_seconds` | `600` | 成功发送去重窗口；待处理或未知结果持续阻止重复提交 |
 | `publishing.outbox_purge_days` | `7` | 启动时清理过期失败 outbox 记录；`0` 不清理 |
 | `publishing.comment_daily_limit` | `30` | 同一发送账号所有来源的真实评论日上限；`0` 不限，整数 0–100000 |
+
+在 **设置 → 统一插件设置 → 发布与审核** 中，默认社区/话题可输入名称搜索，从下拉框添加，点击已选项移除，再点击“校验并保存”。搜索使用已保存并登录的默认发布档案；已有 ID 会保留，搜索到对应社区后显示名称。帖子可见范围也可直接从下拉框选择。
 
 ### 通知处理与评论额度（dev）
 

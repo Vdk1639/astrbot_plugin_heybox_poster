@@ -4,6 +4,7 @@ const state = {
   config: null,
   savedConfig: null,
   configSchema: null,
+  topicNames: new Map(),
   status: null,
   loginTimer: null,
   loginRefreshTimer: null,
@@ -286,21 +287,24 @@ function createScalarField(key, descriptor, value, update) {
     control.addEventListener("input", () => {
       update(control.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean));
     });
-  } else if (descriptor.type === "string" && Array.isArray(descriptor.options)) {
+  } else if (Array.isArray(descriptor.options)) {
     control = document.createElement("select");
-    descriptor.options.forEach((optionValue) => {
+    descriptor.options.forEach((optionValue, index) => {
       const option = document.createElement("option");
       const value = typeof optionValue === "object" ? optionValue.value : optionValue;
       option.value = String(value);
       option.textContent = String(
         (typeof optionValue === "object" && optionValue.label)
           || descriptor.option_labels?.[value]
+          || descriptor.labels?.[index]
           || value,
       );
       control.append(option);
     });
     control.value = String(value ?? descriptor.default ?? "");
-    control.addEventListener("change", () => update(control.value));
+    control.addEventListener("change", () => update(
+      descriptor.type === "int" || descriptor.type === "float" ? Number(control.value) : control.value,
+    ));
   } else {
     control = document.createElement("input");
     const numeric = descriptor.type === "int" || descriptor.type === "float";
@@ -335,6 +339,117 @@ function createScalarField(key, descriptor, value, update) {
   control.dataset.configKey = key;
   field.append(control);
   appendHint(field, descriptor);
+  return field;
+}
+
+function createDefaultTopicsField(descriptor, group) {
+  const config = state.config;
+  const version = nextRequest("default-topics");
+  const current = () => currentRequest("default-topics", version) && state.config === config;
+  const selected = () => [...new Set(String(group.default_topic_ids || "").split(/[\s,，]+/).filter(Boolean))];
+  const field = document.createElement("div");
+  field.className = "config-field";
+  const label = document.createElement("label");
+  const title = document.createElement("span");
+  title.className = "config-label";
+  title.textContent = fieldLabel(descriptor, "default_topic_ids");
+  const keyword = document.createElement("input");
+  keyword.type = "search";
+  keyword.placeholder = "输入社区/话题名称";
+  keyword.maxLength = 100;
+  keyword.dataset.configKey = "default_topic_search";
+  label.append(title, keyword);
+  const search = document.createElement("button");
+  search.type = "button";
+  search.className = "secondary compact";
+  search.textContent = "搜索社区";
+  const choices = document.createElement("select");
+  choices.dataset.configKey = "default_topic_ids";
+  choices.setAttribute("aria-label", "选择默认发帖社区/话题");
+  const picked = document.createElement("div");
+  picked.className = "button-row";
+  picked.setAttribute("aria-label", "已选默认社区");
+  const status = document.createElement("small");
+  status.className = "config-hint";
+  status.setAttribute("role", "status");
+  let resultProfile = "";
+  const emptyChoices = (message) => {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = message;
+    choices.replaceChildren(option);
+    choices.disabled = true;
+  };
+  const renderPicked = () => {
+    picked.replaceChildren();
+    for (const id of selected()) {
+      const name = state.topicNames.get(id) || `已保存社区（ID ${id}）`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary compact";
+      remove.textContent = `${name} ×`;
+      remove.setAttribute("aria-label", `移除默认社区：${name}`);
+      remove.addEventListener("click", () => {
+        if (!current()) return;
+        group.default_topic_ids = selected().filter((value) => value !== id).join(",");
+        renderPicked();
+      });
+      picked.append(remove);
+    }
+    for (const option of choices.options) option.disabled = selected().includes(option.value);
+  };
+  const searchTopics = async () => {
+    if (!current() || search.disabled) return;
+    const query = keyword.value.trim();
+    if (!query || query.length > 100) { status.textContent = "请输入 1–100 字的社区名称。"; return; }
+    const profile = group.profile_id;
+    search.disabled = true;
+    emptyChoices("正在搜索社区…");
+    status.textContent = "正在读取社区列表…";
+    try {
+      const result = await bridge.apiGet("publishing/topics", { profile_id: profile, keyword: query });
+      if (!current()) return;
+      if (group.profile_id !== profile) { emptyChoices("发帖档案已变更，请重新搜索"); status.textContent = "请使用新的发帖档案重新搜索。"; return; }
+      emptyChoices(result.items?.length ? "请选择社区，可添加多个" : "没有匹配的社区，请更换名称");
+      const seen = new Set();
+      for (const item of result.items || []) {
+        const id = String(item.topic_id || "");
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        state.topicNames.set(id, String(item.name || id));
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = state.topicNames.get(id);
+        choices.append(option);
+      }
+      resultProfile = profile;
+      choices.disabled = !seen.size;
+      choices.value = "";
+      renderPicked();
+      status.textContent = seen.size ? "从下拉框添加社区；点击已选项可移除。点击“校验并保存”后生效。" : "未找到社区，已选设置保持不变。";
+    } catch (error) {
+      if (!current()) return;
+      emptyChoices("搜索失败，可重试");
+      status.textContent = `社区搜索失败：${error.message}。已选设置保持不变。`;
+    } finally {
+      if (current()) search.disabled = false;
+    }
+  };
+  search.addEventListener("click", searchTopics);
+  keyword.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); return searchTopics(); }
+  });
+  choices.addEventListener("change", () => {
+    if (!current() || !choices.value) return;
+    if (group.profile_id !== resultProfile) { emptyChoices("发帖档案已变更，请重新搜索"); return; }
+    group.default_topic_ids = [...new Set([...selected(), choices.value])].join(",");
+    choices.value = "";
+    renderPicked();
+  });
+  emptyChoices("先按名称搜索社区");
+  status.textContent = "可添加多个默认社区；搜索使用“默认账号档案”，请先保存并登录该档案。";
+  renderPicked();
+  field.append(label, search, choices, picked, status);
   return field;
 }
 
@@ -434,6 +549,10 @@ function renderObjectGroup(groupKey, schema) {
   grid.className = "config-grid";
   const group = state.config[groupKey] || (state.config[groupKey] = {});
   Object.entries(schema.items || {}).forEach(([fieldKey, descriptor]) => {
+    if (groupKey === "publishing" && fieldKey === "default_topic_ids") {
+      grid.append(createDefaultTopicsField(descriptor, group));
+      return;
+    }
     grid.append(createScalarField(fieldKey, descriptor, group[fieldKey], (nextValue) => {
       group[fieldKey] = nextValue;
     }));

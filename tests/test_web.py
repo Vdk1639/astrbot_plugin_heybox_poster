@@ -78,12 +78,60 @@ class DashboardTests(PluginTestCase):
         routes = {call.args[0]: call.args[2] for call in calls}
         self.assertEqual(len(routes), len(calls))
         self.assertTrue(all(route.startswith(f"/{PLUGIN_NAME}/") for route in routes))
-        for suffix in ("status", "auth/status", "config/schema", "publishing/status", "publishing/reviews"):
+        for suffix in ("status", "auth/status", "config/schema", "publishing/status", "publishing/topics", "publishing/reviews"):
             self.assertEqual(routes[f"/{PLUGIN_NAME}/{suffix}"], ["GET"])
         for suffix in ("auth/qr", "auth/check", "auth/logout", "publishing/submit",
                        "publishing/reviews/<review_id>/approve", "publishing/reviews/<review_id>/reject"):
             self.assertEqual(routes[f"/{PLUGIN_NAME}/{suffix}"], ["POST"])
         self.assertNotIn(f"/{PLUGIN_NAME}/auth/cancel", routes)
+
+    async def test_topic_search_uses_selected_profile_and_only_returns_topic_choices(self):
+        replacement = self.runtime.config.snapshot()
+        secondary = copy.deepcopy(replacement["profiles"][0])
+        secondary["profile_id"] = "secondary"
+        replacement["profiles"].append(secondary)
+        await self.runtime.config.save(replacement)
+        self._set_credentials(self.plugin, uid="2", profile_id="secondary")
+        self.request.query = Query({"keyword": "  社区  ", "profile_id": "secondary"})
+        search = mock.AsyncMock(return_value=[{"topic_id": 43, "name": "社区名", "extra": "private"}])
+        before_config = self.runtime.config.snapshot()
+        before_credentials = self.runtime.credentials.load("secondary")
+        with mock.patch.object(self.plugin, "_get_client", return_value=types.SimpleNamespace(search_topics=search)) as client:
+            response = await self.web.topics()
+        self.assertEqual(response["status_code"], 200)
+        self.assertEqual(response["json"], {"profile_id": "secondary", "items": [{"topic_id": "43", "name": "社区名"}]})
+        client.assert_called_once_with("secondary")
+        search.assert_awaited_once_with("社区", limit=20)
+        self.assertEqual(self.runtime.config.snapshot(), before_config)
+        self.assertEqual(self.runtime.credentials.load("secondary"), before_credentials)
+        self.assertEqual(self.plugin.publisher.queue.list(), [])
+        self.assertFalse(self.runtime._started)
+
+    async def test_topic_search_validates_keyword_profile_and_login_before_network(self):
+        with mock.patch.object(self.plugin, "_get_client") as client:
+            for query in ({}, {"keyword": " "}, {"keyword": "a" * 101},
+                          {"keyword": "社区", "profile_id": "missing"}):
+                with self.subTest(query=query):
+                    self.request.query = Query(query)
+                    self.assertEqual((await self.web.topics())["status_code"], 400)
+            self.request.query = Query({"keyword": "社区"})
+            with mock.patch.object(self.plugin.publisher, "credentials", side_effect=ValueError("尚未登录")):
+                self.assertEqual((await self.web.topics())["status_code"], 400)
+            with mock.patch.object(self.runtime.config, "profile", return_value={"enabled": False}):
+                self.assertEqual((await self.web.topics())["status_code"], 400)
+            client.assert_not_called()
+
+    async def test_topic_search_handles_empty_results_and_hides_upstream_errors(self):
+        self.request.query = Query({"keyword": "社区"})
+        search = mock.AsyncMock(return_value=[])
+        with mock.patch.object(self.plugin, "_get_client", return_value=types.SimpleNamespace(search_topics=search)):
+            response = await self.web.topics()
+            self.assertEqual(response["json"], {"profile_id": "default", "items": []})
+            for error in (RuntimeError("private credential"), ValueError("private credential")):
+                search.side_effect = error
+                response = await self.web.topics()
+                self.assertEqual(response["status_code"], 502)
+                self.assertNotIn("private credential", str(response))
 
     async def test_logout_and_approval_require_literal_confirmation(self):
         review_id = await self._submit()
