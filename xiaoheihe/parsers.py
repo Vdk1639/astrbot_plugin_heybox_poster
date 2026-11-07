@@ -642,6 +642,9 @@ def parse_comment_corpus_rows(
         result = payload.get("result", {}) if isinstance(payload, Mapping) else {}
         if not isinstance(result, Mapping) or not isinstance(result.get("comments"), list):
             return []
+        topic_id, topic_name = _comment_corpus_topic(result)
+        post_topic_id = str(post_topic_id or topic_id)
+        post_topic_name = str(post_topic_name or topic_name)
 
         collected_at = time.time()
         rows: list[dict[str, Any]] = []
@@ -745,6 +748,24 @@ def parse_comment_corpus_rows(
         return rows
     except Exception:
         return []
+
+
+def _comment_corpus_topic(result: Mapping[str, Any]) -> tuple[str, str]:
+    link = result.get("link", result.get("post", {}))
+    if not isinstance(link, Mapping):
+        return "", ""
+    topics = link.get("topics", [])
+    if isinstance(topics, Mapping):
+        topics = [topics]
+    if not isinstance(topics, list) or not topics:
+        return "", ""
+    topic = topics[0]
+    if not isinstance(topic, Mapping):
+        return "", ""
+    return (
+        _id(topic, "topic_id", "topicid", "id"),
+        str(_first(topic, "name", "title", "topic_name", default="") or ""),
+    )
 
 
 def _corpus_int(value: Any) -> int:

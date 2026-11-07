@@ -123,7 +123,8 @@ async def test_comment_corpus_collection_is_async_and_does_not_block_reply(repos
                             }
                         ]
                     }
-                ]
+                ],
+                "link": {"topics": [{"topic_id": "42", "name": "AI 交流"}]}
             }
         },
         "post",
@@ -134,9 +135,14 @@ async def test_comment_corpus_collection_is_async_and_does_not_block_reply(repos
     ) is None
     await service.stop()
     row = await repository.db.fetchone(
-        "SELECT verdict, content FROM comment_corpus WHERE comment_id = ?", ("corpus-1",)
+        "SELECT verdict, content, post_topic_id, post_topic_name FROM comment_corpus WHERE comment_id = ?", ("corpus-1",)
     )
-    assert dict(row) == {"verdict": "human", "content": "真人评论"}
+    assert dict(row) == {
+        "verdict": "human",
+        "content": "真人评论",
+        "post_topic_id": "42",
+        "post_topic_name": "AI 交流",
+    }
 
 
 async def test_comment_corpus_storage_error_does_not_escape_callback(repository) -> None:

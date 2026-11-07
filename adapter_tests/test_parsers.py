@@ -328,7 +328,8 @@ def test_comment_corpus_parses_nested_comments_and_filters_verdicts() -> None:
                         ]
                     },
                     {"comment": [{"commentid": 3, "text": "unknown", "user": {"userid": "new"}}]},
-                ]
+                ],
+                "link": {"topics": [{"topic_id": 42, "name": "AI 交流"}]},
             }
         },
         profile_id="default",
@@ -344,6 +345,8 @@ def test_comment_corpus_parses_nested_comments_and_filters_verdicts() -> None:
     assert rows[0]["author_level"] == 7
     assert rows[1]["verdict"] == "unknown_level"
     assert rows[1]["author_level"] is None
+    assert rows[0]["post_topic_id"] == "42"
+    assert rows[0]["post_topic_name"] == "AI 交流"
 
 
 def test_comment_corpus_filters_self_and_excluded_uids() -> None:
