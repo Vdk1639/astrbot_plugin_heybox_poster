@@ -395,6 +395,49 @@ MIGRATIONS += ((12, """
     CREATE INDEX idx_risk_rule_cooldown ON user_risk_events(profile_id,sender_uid,rule_key,created_at DESC);
 """),)
 
+MIGRATIONS += ((13, """
+    CREATE TABLE comment_corpus (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id TEXT NOT NULL,
+        comment_id TEXT NOT NULL,
+        parent_comment_id TEXT NOT NULL DEFAULT '',
+        post_id TEXT NOT NULL,
+        post_topic_id TEXT NOT NULL DEFAULT '',
+        post_topic_name TEXT NOT NULL DEFAULT '',
+
+        author_uid TEXT NOT NULL,
+        author_nickname TEXT NOT NULL DEFAULT '',
+        author_level INTEGER,
+        level_status INTEGER,
+
+        content TEXT NOT NULL,
+        text_len INTEGER NOT NULL DEFAULT 0,
+        emote_count INTEGER NOT NULL DEFAULT 0,
+        emotes_json TEXT NOT NULL DEFAULT '[]',
+        is_pure_emote INTEGER NOT NULL DEFAULT 0 CHECK(is_pure_emote IN (0,1)),
+        has_newline INTEGER NOT NULL DEFAULT 0 CHECK(has_newline IN (0,1)),
+
+        ip_location TEXT NOT NULL DEFAULT '',
+        like_count INTEGER NOT NULL DEFAULT 0,
+        reply_count INTEGER NOT NULL DEFAULT 0,
+        is_post_owner INTEGER NOT NULL DEFAULT 0 CHECK(is_post_owner IN (0,1)),
+        floor_num INTEGER NOT NULL DEFAULT 0,
+
+        verdict TEXT NOT NULL,
+        verdict_reason TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'link_tree',
+
+        created_at REAL NOT NULL,
+        collected_at REAL NOT NULL,
+
+        UNIQUE(profile_id, comment_id)
+    );
+
+    CREATE INDEX idx_corpus_verdict_level ON comment_corpus(verdict, author_level);
+    CREATE INDEX idx_corpus_author ON comment_corpus(author_uid);
+    CREATE INDEX idx_corpus_created ON comment_corpus(created_at);
+"""),)
+
 MIGRATION_MARKERS = {
     1: "INSERT INTO schema_migrations(version) VALUES (1);",
     2: "INSERT INTO schema_migrations(version) VALUES (2);",
@@ -408,6 +451,7 @@ MIGRATION_MARKERS = {
     10: "INSERT INTO schema_migrations(version) VALUES (10);",
     11: "INSERT INTO schema_migrations(version) VALUES (11);",
     12: "INSERT INTO schema_migrations(version) VALUES (12);",
+    13: "INSERT INTO schema_migrations(version) VALUES (13);",
 }
 
 

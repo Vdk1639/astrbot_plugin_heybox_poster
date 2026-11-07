@@ -47,6 +47,7 @@ def client_with_handler(handler, *, authenticated=True, callback=None):
 
 async def test_comment_context_merges_original_post_and_root_comment_tree() -> None:
     observed: list[dict[str, str]] = []
+    collected: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         query = dict(request.url.params)
@@ -87,6 +88,7 @@ async def test_comment_context_merges_original_post_and_root_comment_tree() -> N
         )
 
     client, http_client = client_with_handler(handler)
+    client.on_post_tree = lambda payload, post_id, root_id: collected.append((post_id, root_id))
     context = await client.fetch_thread_context("30003", root_comment_id="root-1")
 
     assert len(observed) == 2
@@ -96,6 +98,7 @@ async def test_comment_context_merges_original_post_and_root_comment_tree() -> N
     assert context.body == "原帖正文"
     assert context.image_urls == ["https://cdn.example.com/post.png"]
     assert context.comments[0]["content"] == "楼层内容"
+    assert collected == [("30003", ""), ("30003", "root-1")]
     await client.close()
     await http_client.aclose()
 

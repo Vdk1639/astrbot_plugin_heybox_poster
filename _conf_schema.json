@@ -563,6 +563,57 @@
       }
     }
   },
+  "comment_corpus": {
+    "type": "object",
+    "description": "真人评论语料收集",
+    "items": {
+      "enabled": {
+        "description": "启用收集",
+        "type": "bool",
+        "default": false,
+        "hint": "只旁路已有 link/tree 响应，不新增请求"
+      },
+      "min_level": {
+        "description": "最低收录等级",
+        "type": "int",
+        "default": 7,
+        "min": 0,
+        "max": 100,
+        "hint": "大于等于该等级视为真人样本；等级缺失的单独归档"
+      },
+      "collect_unknown_level": {
+        "description": "等级缺失也收录",
+        "type": "bool",
+        "default": true,
+        "hint": "标记为 unknown_level，等人工抽查后改判"
+      },
+      "excluded_uids": {
+        "description": "强制排除的 UID 列表",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "hint": "已知的机器人/同类账号；自己账号自动排除"
+      },
+      "max_per_day": {
+        "description": "每个账号每日最多收录条数",
+        "type": "int",
+        "default": 500,
+        "min": 0,
+        "max": 100000,
+        "hint": "按账号档案统计，使用当地时间"
+      },
+      "max_rows": {
+        "description": "语料库保留上限",
+        "type": "int",
+        "default": 20000,
+        "min": 1,
+        "max": 1000000,
+        "hint": "超出后按 collected_at 从旧到新淘汰"
+      }
+    }
+  },
   "retention": {
     "type": "object",
     "description": "数据保留与上限",

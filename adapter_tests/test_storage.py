@@ -30,6 +30,7 @@ async def test_database_migrations_and_pragmas(tmp_path) -> None:
         "visual_contexts",
         "visual_context_event_links",
         "visual_context_comment_links",
+        "comment_corpus",
     } <= names
     self_indexes = await database.fetchall("PRAGMA index_list(self_comment_ids)")
     assert {"idx_self_comment_post", "idx_self_comment_created"} <= {
@@ -41,6 +42,36 @@ async def test_database_migrations_and_pragmas(tmp_path) -> None:
     }
     visual_columns = await database.fetchall("PRAGMA table_info(visual_contexts)")
     assert {"owner_uid", "owner_nickname", "owner_role"} <= {row["name"] for row in visual_columns}
+    corpus_columns = await database.fetchall("PRAGMA table_info(comment_corpus)")
+    corpus_column_map = {row["name"]: row for row in corpus_columns}
+    assert {
+        "id",
+        "profile_id",
+        "comment_id",
+        "author_level",
+        "content",
+        "verdict",
+        "collected_at",
+    } <= corpus_column_map.keys()
+    assert corpus_column_map["author_level"]["notnull"] == 0
+    await database.execute(
+        """
+        INSERT INTO comment_corpus(
+            profile_id, comment_id, post_id, author_uid, content,
+            verdict, created_at, collected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("default", "comment", "post", "author", "内容", "human", 1, 2),
+    )
+    corpus_record = await database.fetchone(
+        "SELECT author_level FROM comment_corpus WHERE comment_id = ?",
+        ("comment",),
+    )
+    assert corpus_record["author_level"] is None
+    corpus_indexes = await database.fetchall("PRAGMA index_list(comment_corpus)")
+    assert {"idx_corpus_verdict_level", "idx_corpus_author", "idx_corpus_created"} <= {
+        row["name"] for row in corpus_indexes
+    }
     lookup_columns = await database.fetchall("PRAGMA index_info(idx_visual_context_lookup)")
     assert [row["name"] for row in lookup_columns] == [
         "profile_id",
@@ -64,6 +95,37 @@ async def test_database_migrations_and_pragmas(tmp_path) -> None:
     details = [str(row["detail"]) for row in plan]
     assert any("idx_visual_context_lookup" in detail for detail in details)
     assert not any("TEMP B-TREE" in detail for detail in details)
+    await database.close()
+
+
+async def test_database_upgrades_v12_to_comment_corpus(tmp_path) -> None:
+    path = tmp_path / "upgrade-v12.db"
+    connection = await aiosqlite.connect(path)
+    for version, script in MIGRATIONS:
+        if version >= 13:
+            break
+        await connection.executescript(script)
+    await connection.executemany(
+        "INSERT INTO schema_migrations(version) VALUES (?)",
+        [(version,) for version, _script in MIGRATIONS if version < 13],
+    )
+    await connection.commit()
+    await connection.close()
+
+    database = Database(path)
+    await database.open()
+    assert await database.schema_version() == 13
+    tables = await database.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
+    assert "comment_corpus" in {row["name"] for row in tables}
+    columns = {row["name"]: row for row in await database.fetchall("PRAGMA table_info(comment_corpus)")}
+    assert {"profile_id", "comment_id", "author_level", "content", "collected_at"} <= columns.keys()
+    assert columns["author_level"]["notnull"] == 0
+    indexes = await database.fetchall("PRAGMA index_list(comment_corpus)")
+    assert {"idx_corpus_verdict_level", "idx_corpus_author", "idx_corpus_created"} <= {
+        row["name"] for row in indexes
+    }
+    verdict_index_columns = await database.fetchall("PRAGMA index_info(idx_corpus_verdict_level)")
+    assert [row["name"] for row in verdict_index_columns] == ["verdict", "author_level"]
     await database.close()
 
 
