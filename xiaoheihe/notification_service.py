@@ -6,7 +6,7 @@ import json
 import random
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
 
@@ -15,6 +15,7 @@ from .context_builder import BuiltContext, ContextBuilder
 from .logging_service import LoggingService
 from .models import EventState, Notification, NotificationType, PermissionDecision
 from .permission_service import PermissionService
+from .parsers import parse_comment_corpus_rows
 from .repository import Repository
 from .task_manager import TaskManager
 
@@ -59,8 +60,11 @@ class NotificationService:
         self._recovery_ids: dict[str, int] = {}
         self._floor_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._poll_summary_signatures: dict[str, tuple[Any, ...]] = {}
+        self._corpus_tasks: set[asyncio.Task[None]] = set()
+        self._corpus_stopping = False
         self._sequence = itertools.count()
         self._stop = asyncio.Event()
+        setattr(self.client, "on_post_tree", self._on_post_tree)
 
     async def run(self) -> None:
         # Restore persisted work before polling starts.  This keeps a due retry from
@@ -709,6 +713,53 @@ class NotificationService:
             )
             raise
 
+    def _on_post_tree(
+        self, payload: Mapping[str, Any], post_id: str, root_comment_id: str
+    ) -> None:
+        try:
+            config = self.config.get("comment_corpus") or {}
+            if self._corpus_stopping or not config.get("enabled", False):
+                return
+            credentials = getattr(self.client, "credentials", None)
+            self_uid = str(
+                getattr(credentials, "uid", "") or self.permissions.self_uid or ""
+            )
+            rows = parse_comment_corpus_rows(
+                payload,
+                profile_id=self.profile_id,
+                self_uid=self_uid,
+                min_level=int(config.get("min_level", 7)),
+                collect_unknown_level=bool(config.get("collect_unknown_level", True)),
+                excluded_uids={str(value) for value in config.get("excluded_uids", [])},
+                post_id=post_id,
+            )
+            if not rows:
+                return
+            task = asyncio.create_task(self._safe_save_corpus(rows))
+            self._corpus_tasks.add(task)
+            task.add_done_callback(self._corpus_tasks.discard)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit(
+                "DEBUG",
+                f"评论语料采集跳过: {type(exc).__name__}: {exc}",
+                profile_id=self.profile_id,
+            )
+
+    async def _safe_save_corpus(self, rows: list[dict[str, Any]]) -> None:
+        try:
+            config = self.config.get("comment_corpus") or {}
+            await self.repository.save_comment_corpus(
+                rows,
+                max_per_day=int(config.get("max_per_day", 500)),
+                max_rows=int(config.get("max_rows", 20000)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit(
+                "DEBUG",
+                f"评论语料落库跳过: {type(exc).__name__}: {exc}",
+                profile_id=self.profile_id,
+            )
+
     async def _matches_uidless_self_message(self, notification: Notification) -> bool:
         if notification.sender_uid_verified:
             return False
@@ -769,8 +820,15 @@ class NotificationService:
 
     async def stop(self) -> None:
         self._stop.set()
+        self._corpus_stopping = True
         with suppress(TimeoutError):
             await asyncio.wait_for(self._queue.join(), timeout=5)
+        if self._corpus_tasks:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*self._corpus_tasks, return_exceptions=True),
+                    timeout=5,
+                )
         self._floor_locks.clear()
         self._pending_event_keys.clear()
         self._limit_warning_users.clear()

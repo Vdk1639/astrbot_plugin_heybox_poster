@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping
 from http.cookies import CookieError, SimpleCookie
@@ -619,6 +620,140 @@ def _feed_popularity(post: Mapping[str, Any]) -> int:
         except (TypeError, ValueError):
             continue
     return score
+
+
+_CORPUS_EMOTE_RE = re.compile(r"\[cube_([^\]]+)\]")
+
+
+def parse_comment_corpus_rows(
+    payload: Mapping[str, Any],
+    *,
+    profile_id: str,
+    self_uid: str,
+    min_level: int,
+    collect_unknown_level: bool,
+    excluded_uids: set[str],
+    post_id: str = "",
+    post_topic_id: str = "",
+    post_topic_name: str = "",
+) -> list[dict[str, Any]]:
+    """Extract accepted comment corpus rows from a link/tree response."""
+    try:
+        result = payload.get("result", {}) if isinstance(payload, Mapping) else {}
+        if not isinstance(result, Mapping) or not isinstance(result.get("comments"), list):
+            return []
+
+        collected_at = time.time()
+        rows: list[dict[str, Any]] = []
+        for group in result["comments"]:
+            if not isinstance(group, Mapping) or not isinstance(group.get("comment"), list):
+                continue
+            for raw in group["comment"]:
+                try:
+                    if not isinstance(raw, Mapping):
+                        continue
+                    user = raw.get("user", {})
+                    user = user if isinstance(user, Mapping) else {}
+                    author_uid = _id(
+                        user,
+                        "userid",
+                        "uid",
+                        "heybox_id",
+                        "heyboxid",
+                        "user_id",
+                        "id",
+                    )
+                    if author_uid == str(self_uid) or author_uid in {
+                        str(value) for value in excluded_uids
+                    }:
+                        continue
+
+                    level_info = user.get("level_info", {})
+                    level_info = level_info if isinstance(level_info, Mapping) else {}
+                    raw_level = level_info.get("level")
+                    if raw_level is None:
+                        author_level = None
+                    else:
+                        if isinstance(raw_level, bool):
+                            raise ValueError("invalid author level")
+                        author_level = int(raw_level)
+                    if author_level is None:
+                        if not collect_unknown_level:
+                            continue
+                        verdict = "unknown_level"
+                        verdict_reason = "level_missing"
+                    elif author_level < int(min_level):
+                        continue
+                    else:
+                        verdict = "human"
+                        verdict_reason = "level_meets_minimum"
+
+                    text = str(_first(raw, "text", "content", default="") or "")
+                    matches = _CORPUS_EMOTE_RE.findall(text)
+                    emotes = list(dict.fromkeys(matches))
+                    plain = _CORPUS_EMOTE_RE.sub("", text)
+                    rows.append(
+                        {
+                            "profile_id": str(profile_id),
+                            "comment_id": _id(raw, "commentid", "comment_id", "id"),
+                            "parent_comment_id": _id(
+                                raw,
+                                "parent_comment_id",
+                                "parent_commentid",
+                                "parent_id",
+                                "reply_comment_id",
+                                "reply_commentid",
+                            ),
+                            "post_id": str(post_id),
+                            "post_topic_id": str(post_topic_id),
+                            "post_topic_name": str(post_topic_name),
+                            "author_uid": author_uid,
+                            "author_nickname": str(
+                                _first(user, "username", "nickname", "name", default="") or ""
+                            ),
+                            "author_level": author_level,
+                            "level_status": _corpus_int(level_info.get("status")),
+                            "content": text,
+                            "text_len": len(plain.strip()),
+                            "emote_count": len(matches),
+                            "emotes_json": json.dumps(emotes, ensure_ascii=False),
+                            "is_pure_emote": int(bool(emotes) and not plain.strip()),
+                            "has_newline": int("\n" in text),
+                            "ip_location": str(raw.get("ip_location") or ""),
+                            "like_count": _corpus_int(raw.get("up")),
+                            "reply_count": _corpus_int(raw.get("child_num")),
+                            "is_post_owner": int(bool(raw.get("is_link_owner"))),
+                            "floor_num": _corpus_int(raw.get("floor_num")),
+                            "verdict": verdict,
+                            "verdict_reason": verdict_reason,
+                            "source": "link_tree",
+                            "created_at": _feed_timestamp(
+                                _first(
+                                    raw,
+                                    "create_at",
+                                    "created_at",
+                                    "timestamp",
+                                    "time",
+                                    default=0,
+                                )
+                            ),
+                            "collected_at": collected_at,
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+        return rows
+    except Exception:
+        return []
+
+
+def _corpus_int(value: Any) -> int:
+    if value in (None, "") or isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def parse_thread_context(payload: Mapping[str, Any], post_id: str) -> ThreadContext:

@@ -4,9 +4,10 @@ import hashlib
 import json
 import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .database import Database
 from .models import EventState, Notification, RoutingTarget
@@ -20,6 +21,10 @@ FINAL_STATES = {
     EventState.DEAD_LETTER.value,
 }
 MAX_CLEANUP_BATCHES_PER_RULE = 20
+try:
+    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+except ZoneInfoNotFoundError:
+    SHANGHAI_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 
 class Repository:
@@ -2116,6 +2121,191 @@ class Repository:
             row = await self.db.fetchone(f"SELECT COUNT(*) AS count FROM {table}")
             counts[table] = int(row["count"]) if row else 0
         return counts
+
+    async def save_comment_corpus(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        max_per_day: int = 500,
+        max_rows: int = 20000,
+        now: float | None = None,
+    ) -> int:
+        if type(max_per_day) is not int or max_per_day < 0:
+            raise ValueError("max_per_day 必须是非负整数")
+        if type(max_rows) is not int or max_rows < 0:
+            raise ValueError("max_rows 必须是非负整数")
+        if not rows:
+            return 0
+
+        current = float(now if now is not None else time.time())
+        local_now = datetime.fromtimestamp(current, SHANGHAI_TZ)
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        day_start_ts = day_start.timestamp()
+        day_end_ts = day_end.timestamp()
+
+        async with self.db.transaction() as connection:
+            profiles = list(dict.fromkeys(str(row.get("profile_id", "")) for row in rows))
+            placeholders = ",".join("?" for _ in profiles)
+            counts_cursor = await connection.execute(
+                f"""
+                SELECT profile_id, COUNT(*) AS count
+                FROM comment_corpus
+                WHERE collected_at >= ? AND collected_at < ?
+                  AND profile_id IN ({placeholders})
+                GROUP BY profile_id
+                """,
+                (day_start_ts, day_end_ts, *profiles),
+            )
+            try:
+                daily_counts = {
+                    str(row["profile_id"]): int(row["count"])
+                    for row in await counts_cursor.fetchall()
+                }
+            finally:
+                await counts_cursor.close()
+
+            existing_cursor = await connection.execute(
+                f"SELECT profile_id, comment_id FROM comment_corpus WHERE profile_id IN ({placeholders})",
+                profiles,
+            )
+            try:
+                existing = {
+                    (str(row["profile_id"]), str(row["comment_id"]))
+                    for row in await existing_cursor.fetchall()
+                }
+            finally:
+                await existing_cursor.close()
+
+            values: list[tuple[Any, ...]] = []
+            seen: set[tuple[str, str]] = set()
+            accepted_today: dict[str, int] = {}
+            for row in rows:
+                profile_id = str(row.get("profile_id", ""))
+                comment_id = str(row.get("comment_id", ""))
+                key = (profile_id, comment_id)
+                if key in existing or key in seen:
+                    continue
+                if daily_counts.get(profile_id, 0) + accepted_today.get(profile_id, 0) >= max_per_day:
+                    continue
+                seen.add(key)
+                accepted_today[profile_id] = accepted_today.get(profile_id, 0) + 1
+                values.append(
+                    (
+                        profile_id,
+                        comment_id,
+                        str(row.get("parent_comment_id", "")),
+                        str(row.get("post_id", "")),
+                        str(row.get("post_topic_id", "")),
+                        str(row.get("post_topic_name", "")),
+                        str(row.get("author_uid", "")),
+                        str(row.get("author_nickname", "")),
+                        row.get("author_level"),
+                        row.get("level_status"),
+                        str(row.get("content", "")),
+                        int(row.get("text_len", 0)),
+                        int(row.get("emote_count", 0)),
+                        str(row.get("emotes_json", "[]")),
+                        int(bool(row.get("is_pure_emote", 0))),
+                        int(bool(row.get("has_newline", 0))),
+                        str(row.get("ip_location", "")),
+                        int(row.get("like_count", 0)),
+                        int(row.get("reply_count", 0)),
+                        int(bool(row.get("is_post_owner", 0))),
+                        int(row.get("floor_num", 0)),
+                        str(row.get("verdict", "")),
+                        str(row.get("verdict_reason", "")),
+                        str(row.get("source", "link_tree")),
+                        float(row.get("created_at", current)),
+                        float(row.get("collected_at", current)),
+                    )
+                )
+
+            inserted = 0
+            if values:
+                insert_cursor = await connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO comment_corpus(
+                        profile_id, comment_id, parent_comment_id, post_id,
+                        post_topic_id, post_topic_name, author_uid, author_nickname,
+                        author_level, level_status, content, text_len, emote_count,
+                        emotes_json, is_pure_emote, has_newline, ip_location,
+                        like_count, reply_count, is_post_owner, floor_num, verdict,
+                        verdict_reason, source, created_at, collected_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                try:
+                    inserted = max(0, int(insert_cursor.rowcount))
+                finally:
+                    await insert_cursor.close()
+
+            total_cursor = await connection.execute("SELECT COUNT(*) AS count FROM comment_corpus")
+            try:
+                total = int((await total_cursor.fetchone())["count"])
+            finally:
+                await total_cursor.close()
+            excess = total - max_rows
+            if excess > 0:
+                await connection.execute(
+                    """
+                    DELETE FROM comment_corpus
+                    WHERE id IN (
+                        SELECT id FROM comment_corpus
+                        ORDER BY collected_at ASC, id ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (excess,),
+                )
+            return inserted
+
+    async def export_comment_corpus(
+        self,
+        verdict: str = "human",
+        min_len: int = 0,
+        max_len: int = 200,
+        pure_emote_only: bool = False,
+        with_emote_only: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if min_len < 0 or max_len < min_len or limit < 0:
+            raise ValueError("语料导出筛选范围无效")
+        conditions = ["verdict = ?", "text_len >= ?", "text_len <= ?"]
+        parameters: list[Any] = [verdict, min_len, max_len]
+        if pure_emote_only:
+            conditions.append("is_pure_emote = 1")
+        if with_emote_only:
+            conditions.append("emote_count > 0")
+        rows = await self.db.fetchall(
+            f"""
+            SELECT content, author_level, emotes_json, text_len, like_count
+            FROM comment_corpus
+            WHERE {' AND '.join(conditions)}
+            ORDER BY collected_at DESC, id DESC
+            LIMIT ?
+            """,
+            (*parameters, limit),
+        )
+        exported: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                emotes = json.loads(row["emotes_json"] or "[]")
+            except (TypeError, ValueError):
+                emotes = []
+            if not isinstance(emotes, list):
+                emotes = []
+            exported.append(
+                {
+                    "content": row["content"],
+                    "author_level": row["author_level"],
+                    "emotes": emotes,
+                    "text_len": row["text_len"],
+                    "like_count": row["like_count"],
+                }
+            )
+        return exported
 
     def database_size(self) -> int:
         paths = (

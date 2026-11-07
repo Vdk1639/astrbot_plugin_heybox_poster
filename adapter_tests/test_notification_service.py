@@ -102,6 +102,59 @@ async def test_first_poll_does_not_enqueue_history(repository) -> None:
     )
 
 
+async def test_comment_corpus_collection_is_async_and_does_not_block_reply(repository) -> None:
+    service = make_service(repository, [], lambda *args: None)
+    service.config["comment_corpus"]["enabled"] = True
+    service._on_post_tree(
+        {
+            "result": {
+                "comments": [
+                    {
+                        "comment": [
+                            {
+                                "commentid": "corpus-1",
+                                "text": "真人评论",
+                                "create_at": 1_700_000_000,
+                                "user": {
+                                    "userid": "human",
+                                    "username": "真人",
+                                    "level_info": {"status": 0, "level": 7},
+                                },
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "post",
+        "",
+    )
+    assert await repository.db.fetchone(
+        "SELECT 1 FROM comment_corpus WHERE comment_id = ?", ("corpus-1",)
+    ) is None
+    await service.stop()
+    row = await repository.db.fetchone(
+        "SELECT verdict, content FROM comment_corpus WHERE comment_id = ?", ("corpus-1",)
+    )
+    assert dict(row) == {"verdict": "human", "content": "真人评论"}
+
+
+async def test_comment_corpus_storage_error_does_not_escape_callback(repository) -> None:
+    service = make_service(repository, [], lambda *args: None)
+    service.config["comment_corpus"]["enabled"] = True
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("database locked")
+
+    service.repository.save_comment_corpus = fail
+    service._on_post_tree(
+        {"result": {"comments": [{"comment": [{"commentid": "x", "text": "x", "user": {"userid": "1", "level_info": {"level": 7}}}]}]}},
+        "post",
+        "",
+    )
+    await asyncio.sleep(0)
+
+
 async def test_optional_first_backfill_and_worker_dispatch(repository) -> None:
     dispatched = []
 

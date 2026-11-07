@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 from xiaoheihe.models import EventState, Notification, NotificationType, RoutingTarget
+
+SHANGHAI_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 
 def make_notification(identifier="one", uid="user", post="post") -> Notification:
@@ -22,6 +25,39 @@ def make_notification(identifier="one", uid="user", post="post") -> Notification
         content=f"content {identifier}",
         created_at=time.time(),
     )
+
+
+def corpus_row(
+    comment_id: str,
+    *,
+    profile_id: str = "default",
+    content: str = "hello",
+    author_level: int | None = 8,
+    verdict: str = "human",
+    collected_at: float = 1794103200.0,
+    emotes_json: str = "[]",
+    text_len: int = 5,
+    emote_count: int = 0,
+    is_pure_emote: int = 0,
+    like_count: int = 0,
+) -> dict:
+    return {
+        "profile_id": profile_id,
+        "comment_id": comment_id,
+        "post_id": "post",
+        "author_uid": f"author-{comment_id}",
+        "author_nickname": "User",
+        "author_level": author_level,
+        "content": content,
+        "text_len": text_len,
+        "emote_count": emote_count,
+        "emotes_json": emotes_json,
+        "is_pure_emote": is_pure_emote,
+        "like_count": like_count,
+        "verdict": verdict,
+        "created_at": collected_at,
+        "collected_at": collected_at,
+    }
 
 
 async def test_outgoing_confirmation_self_loop_and_recent_match(repository) -> None:
@@ -378,3 +414,113 @@ async def test_missing_rows_and_invalid_filters(repository) -> None:
         await repository.list_events(status="invalid")
     with pytest.raises(ValueError, match="审核"):
         await repository.review_feed_candidate(1, "invalid")
+
+
+async def test_comment_corpus_save_deduplicates_and_limits_each_profile_per_day(repository) -> None:
+    now = datetime(2026, 11, 8, 12, tzinfo=SHANGHAI_TZ).timestamp()
+    rows = [
+        corpus_row("a-1", profile_id="a", collected_at=now),
+        corpus_row("a-1", profile_id="a", collected_at=now),
+        corpus_row("a-2", profile_id="a", collected_at=now),
+        corpus_row("a-3", profile_id="a", collected_at=now),
+        corpus_row("b-1", profile_id="b", collected_at=now),
+        corpus_row("b-2", profile_id="b", collected_at=now),
+        corpus_row("b-3", profile_id="b", collected_at=now),
+    ]
+
+    assert await repository.save_comment_corpus(rows, max_per_day=2, now=now) == 4
+    assert await repository.save_comment_corpus(rows, max_per_day=2, now=now) == 0
+    counts = await repository.db.fetchall(
+        "SELECT profile_id, COUNT(*) AS count FROM comment_corpus GROUP BY profile_id ORDER BY profile_id"
+    )
+    assert [(row["profile_id"], row["count"]) for row in counts] == [("a", 2), ("b", 2)]
+
+
+async def test_comment_corpus_daily_limit_resets_at_shanghai_midnight(repository) -> None:
+    midnight = datetime(2026, 11, 9, tzinfo=SHANGHAI_TZ).timestamp()
+    await repository.save_comment_corpus(
+        [corpus_row("previous-day", profile_id="a", collected_at=midnight - 1)],
+        max_per_day=1,
+        now=midnight - 1,
+    )
+
+    assert await repository.save_comment_corpus(
+        [corpus_row("new-day", profile_id="a", collected_at=midnight + 1)],
+        max_per_day=1,
+        now=midnight + 1,
+    ) == 1
+
+
+async def test_comment_corpus_save_evicts_oldest_rows_globally(repository) -> None:
+    now = datetime(2026, 11, 8, 12, tzinfo=SHANGHAI_TZ).timestamp()
+    rows = [corpus_row(f"comment-{index}", collected_at=now + index) for index in range(4)]
+
+    assert await repository.save_comment_corpus(rows, max_rows=3, now=now) == 4
+    kept = await repository.db.fetchall(
+        "SELECT comment_id FROM comment_corpus ORDER BY collected_at ASC"
+    )
+    assert [row["comment_id"] for row in kept] == ["comment-1", "comment-2", "comment-3"]
+
+
+async def test_comment_corpus_export_filters_and_decodes_emotes(repository) -> None:
+    now = datetime(2026, 11, 8, 12, tzinfo=SHANGHAI_TZ).timestamp()
+    await repository.save_comment_corpus(
+        [
+            corpus_row(
+                "human-emote",
+                content="[cube_smile] useful",
+                emotes_json='["smile"]',
+                emote_count=1,
+                text_len=6,
+                like_count=3,
+                collected_at=now,
+            ),
+            corpus_row(
+                "human-pure",
+                content="[cube_wave]",
+                emotes_json='["wave"]',
+                emote_count=1,
+                is_pure_emote=1,
+                text_len=0,
+                collected_at=now + 1,
+            ),
+            corpus_row(
+                "unknown",
+                author_level=None,
+                verdict="unknown_level",
+                content="unknown",
+                text_len=7,
+                collected_at=now + 2,
+            ),
+        ],
+        now=now,
+    )
+
+    assert await repository.export_comment_corpus() == [
+        {
+            "content": "[cube_wave]",
+            "author_level": 8,
+            "emotes": ["wave"],
+            "text_len": 0,
+            "like_count": 0,
+        },
+        {
+            "content": "[cube_smile] useful",
+            "author_level": 8,
+            "emotes": ["smile"],
+            "text_len": 6,
+            "like_count": 3,
+        },
+    ]
+    assert [
+        row["content"]
+        for row in await repository.export_comment_corpus(
+            pure_emote_only=True, with_emote_only=True
+        )
+    ] == ["[cube_wave]"]
+    assert [
+        row["content"]
+        for row in await repository.export_comment_corpus(
+            verdict="unknown_level", min_len=7, max_len=7
+        )
+    ] == ["unknown"]

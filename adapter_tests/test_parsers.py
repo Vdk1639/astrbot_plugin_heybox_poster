@@ -9,6 +9,7 @@ from xiaoheihe.models import LoginState, NotificationType
 from xiaoheihe.parsers import (
     ResponseShapeError,
     parse_credentials,
+    parse_comment_corpus_rows,
     parse_login_state,
     parse_notification_post_context,
     parse_notifications,
@@ -295,6 +296,124 @@ def test_millisecond_notification_timestamp_is_normalized() -> None:
     )
     assert page.items[0]["notification"].created_at == 1_700_000_000
     assert before <= page.items[0]["notification"].observed_at <= time.time()
+
+
+def test_comment_corpus_parses_nested_comments_and_filters_verdicts() -> None:
+    rows = parse_comment_corpus_rows(
+        {
+            "result": {
+                "comments": [
+                    {
+                        "comment": [
+                            {
+                                "commentid": 1,
+                                "text": "Lv7",
+                                "create_at": 1_700_000_000,
+                                "user": {
+                                    "userid": "human",
+                                    "username": "真人",
+                                    "level_info": {"status": 1, "level": 7},
+                                },
+                            },
+                            {
+                                "commentid": 2,
+                                "text": "Lv6",
+                                "user": {"userid": "low", "level_info": {"level": 6}},
+                            },
+                            {
+                                "commentid": 4,
+                                "text": "Lv0",
+                                "user": {"userid": "zero", "level_info": {"level": 0}},
+                            },
+                        ]
+                    },
+                    {"comment": [{"commentid": 3, "text": "unknown", "user": {"userid": "new"}}]},
+                ]
+            }
+        },
+        profile_id="default",
+        self_uid="self",
+        min_level=7,
+        collect_unknown_level=True,
+        excluded_uids={"excluded"},
+        post_id="post-1",
+    )
+
+    assert [row["comment_id"] for row in rows] == ["1", "3"]
+    assert rows[0]["verdict"] == "human"
+    assert rows[0]["author_level"] == 7
+    assert rows[1]["verdict"] == "unknown_level"
+    assert rows[1]["author_level"] is None
+
+
+def test_comment_corpus_filters_self_and_excluded_uids() -> None:
+    rows = parse_comment_corpus_rows(
+        {
+            "result": {
+                "comments": [
+                    {
+                        "comment": [
+                            {"commentid": "self", "text": "x", "user": {"userid": "100", "level_info": {"level": 9}}},
+                            {"commentid": "excluded", "text": "x", "user": {"userid": "200", "level_info": {"level": 9}}},
+                        ]
+                    }
+                ]
+            }
+        },
+        profile_id="default",
+        self_uid="100",
+        min_level=7,
+        collect_unknown_level=True,
+        excluded_uids={"200"},
+    )
+
+    assert rows == []
+
+
+def test_comment_corpus_calculates_text_and_emote_fields() -> None:
+    rows = parse_comment_corpus_rows(
+        {
+            "result": {
+                "comments": [
+                    {
+                        "comment": [
+                            {"commentid": "empty", "text": "", "user": {"userid": "1", "level_info": {"level": 7}}},
+                            {"commentid": "emote", "text": "[cube_喜欢][cube_喜欢]", "user": {"userid": "2", "level_info": {"level": 7}}},
+                            {"commentid": "mixed", "text": "你好\n[cube_鳄鱼]", "user": {"userid": "3", "level_info": {"level": 7}}},
+                        ]
+                    }
+                ]
+            }
+        },
+        profile_id="default",
+        self_uid="self",
+        min_level=7,
+        collect_unknown_level=True,
+        excluded_uids=set(),
+    )
+
+    by_id = {row["comment_id"]: row for row in rows}
+    assert by_id["empty"]["text_len"] == 0
+    assert by_id["empty"]["is_pure_emote"] == 0
+    assert by_id["emote"]["text_len"] == 0
+    assert by_id["emote"]["emote_count"] == 2
+    assert by_id["emote"]["emotes_json"] == '["喜欢"]'
+    assert by_id["emote"]["is_pure_emote"] == 1
+    assert by_id["mixed"]["text_len"] == 2
+    assert by_id["mixed"]["has_newline"] == 1
+
+
+def test_comment_corpus_unknown_level_can_be_disabled() -> None:
+    rows = parse_comment_corpus_rows(
+        {"result": {"comments": [{"comment": [{"text": "x", "user": {"userid": "1"}}]}]}},
+        profile_id="default",
+        self_uid="self",
+        min_level=7,
+        collect_unknown_level=False,
+        excluded_uids=set(),
+    )
+
+    assert rows == []
 
 
 def test_comment_source_time_takes_precedence_over_notification_time() -> None:

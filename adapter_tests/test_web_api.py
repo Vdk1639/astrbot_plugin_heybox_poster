@@ -71,6 +71,8 @@ async def test_config_schema_api_exposes_structured_form_metadata(fake_config) -
     assert schema["providers"]["items"]["llm_provider_id"]["_special"] == ("select_provider")
     assert schema["providers"]["items"]["image_provider_id"]["_special"] == ("select_provider")
     assert schema["providers"]["items"]["context_provider_id"]["_special"] == ("select_provider")
+    assert schema["comment_corpus"]["items"]["enabled"]["default"] is False
+    assert "只旁路已有 link/tree 响应，不新增请求" in schema["comment_corpus"]["items"]["enabled"]["hint"]
     assert schema["logging"]["items"]["level"]["options"] == [
         "DEBUG",
         "INFO",

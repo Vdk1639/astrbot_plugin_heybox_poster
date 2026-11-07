@@ -44,6 +44,7 @@ from .request_signing import (
 from .security import redact_data
 
 AuthInvalidCallback = Callable[[str, int], Awaitable[None]]
+PostTreeCallback = Callable[[Mapping[str, Any], str, str], None]
 
 WEB_CLIENT_PARAMS = {
     "os_type": "web",
@@ -123,6 +124,7 @@ class XiaoheiheApiClient:
         signer: RequestSigner | None = None,
         client: httpx.AsyncClient | None = None,
         on_auth_invalid: AuthInvalidCallback | None = None,
+        on_post_tree: PostTreeCallback | None = None,
     ) -> None:
         self.profile_id = profile_id
         self.credentials = credentials
@@ -144,6 +146,7 @@ class XiaoheiheApiClient:
             self._device_id = credentials.device_id
         self._limiter = AsyncRateLimiter(min_request_interval_seconds)
         self._on_auth_invalid = on_auth_invalid
+        self.on_post_tree = on_post_tree
         self._closed = False
         self.last_success_at: str | None = None
         self.last_error: dict[str, Any] | None = None
@@ -292,6 +295,7 @@ class XiaoheiheApiClient:
                 EndpointName.POST_TREE,
                 params={"link_id": post_id, "h_src": ""},
             )
+            self._notify_post_tree(post_response.payload, post_id, "")
             try:
                 post_context = parse_thread_context(post_response.payload, post_id)
             except ResponseShapeError as exc:
@@ -316,6 +320,7 @@ class XiaoheiheApiClient:
                 "h_src": "",
             },
         )
+        self._notify_post_tree(thread_response.payload, post_id, root_comment_id)
         try:
             thread_context = parse_thread_context(thread_response.payload, post_id)
         except ResponseShapeError as exc:
@@ -330,6 +335,18 @@ class XiaoheiheApiClient:
             self._remember_error(error)
             raise error from exc
         return _merge_post_and_thread_context(post_context, thread_context)
+
+    def _notify_post_tree(
+        self, payload: Mapping[str, Any], post_id: str, root_comment_id: str
+    ) -> None:
+        callback = self.on_post_tree
+        if callback is None:
+            return
+        try:
+            callback(payload, post_id, root_comment_id)
+        except Exception:
+            # The collector is observational and must never affect reply handling.
+            return
 
     async def send_comment(
         self, route: RoutingTarget, content: str, *, before_send: Callable[[], Awaitable[None]] | None = None,

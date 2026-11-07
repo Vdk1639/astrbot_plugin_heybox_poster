@@ -36,6 +36,59 @@ def test_config_defaults_and_profile(fake_config) -> None:
     assert service.snapshot()["reply"]["provider_fallback_grace_seconds"] == 60
 
 
+@pytest.mark.asyncio
+async def test_comment_corpus_defaults_survive_upgrade_save_and_schema(fake_config) -> None:
+    fake_config.pop("comment_corpus", None)
+    service = ConfigService(fake_config)
+    expected = {
+        "enabled": False,
+        "min_level": 7,
+        "collect_unknown_level": True,
+        "excluded_uids": [],
+        "max_per_day": 500,
+        "max_rows": 20000,
+    }
+    assert service.snapshot()["comment_corpus"] == expected
+    assert service.defaults()["comment_corpus"] == expected
+
+    schema = service.ui_schema()
+    raw_schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8")
+    )
+    for definition in (schema, raw_schema):
+        assert definition["comment_corpus"]["items"]["enabled"]["default"] is False
+        assert definition["comment_corpus"]["items"]["max_rows"]["default"] == 20000
+        assert "只旁路已有 link/tree 响应，不新增请求" in definition["comment_corpus"]["items"]["enabled"]["hint"]
+
+    candidate = service.snapshot()
+    candidate["comment_corpus"].update({"enabled": True, "max_per_day": 501, "excluded_uids": ["123"]})
+    assert await service.save(candidate) == {"comment_corpus"}
+    assert fake_config["comment_corpus"] == candidate["comment_corpus"]
+    assert ConfigService(fake_config).snapshot()["comment_corpus"] == candidate["comment_corpus"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("enabled", "false"),
+        ("collect_unknown_level", 1),
+        ("min_level", -1),
+        ("min_level", 101),
+        ("max_per_day", -1),
+        ("max_per_day", 100001),
+        ("max_rows", -1),
+        ("max_rows", 1000001),
+        ("excluded_uids", "123"),
+        ("excluded_uids", ["123", True]),
+    ],
+)
+def test_comment_corpus_rejects_invalid_values(field, value) -> None:
+    candidate = copy.deepcopy(DEFAULT_CONFIG)
+    candidate["comment_corpus"][field] = value
+    with pytest.raises(ConfigValidationError, match=field):
+        ConfigService(candidate)
+
+
 def test_legacy_unused_image_byte_limit_settings_are_dropped(fake_config) -> None:
     fake_config["context"]["max_image_size_mb"] = 8
     fake_config["context"]["max_total_image_size_mb"] = 24

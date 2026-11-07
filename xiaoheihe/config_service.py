@@ -118,6 +118,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keywords": [],
         "allowed_post_types": [],
     },
+    "comment_corpus": {
+        "enabled": False,
+        "min_level": 7,
+        "collect_unknown_level": True,
+        "excluded_uids": [],
+        "max_per_day": 500,
+        "max_rows": 20000,
+    },
     "retention": {
         "incoming_body_days": 30,
         "dry_run_days": 30,
@@ -373,6 +381,24 @@ class ConfigService:
             raise ConfigValidationError("proactive_feed.fallback_sources 包含不支持的推荐流分类")
         if "all" in fallback_sources and len(fallback_sources) > 1:
             raise ConfigValidationError("推荐流分类选择“全部”时不能同时选择其他分类")
+
+        comment_corpus = _object(config, "comment_corpus")
+        for key in ("enabled", "collect_unknown_level"):
+            if not isinstance(comment_corpus.get(key), bool):
+                raise ConfigValidationError(f"comment_corpus.{key} 必须是布尔值")
+        _bounded_int(comment_corpus, "min_level", 0, 100)
+        _bounded_int(comment_corpus, "max_per_day", 0, 100000)
+        _bounded_int(comment_corpus, "max_rows", 0, 1000000)
+        excluded_uids = comment_corpus.get("excluded_uids")
+        if not isinstance(excluded_uids, list) or not all(
+            (isinstance(item, (str, int)) and not isinstance(item, bool))
+            for item in excluded_uids
+        ):
+            raise ConfigValidationError("comment_corpus.excluded_uids 必须是字符串或整数列表")
+        if len(excluded_uids) > 10000:
+            raise ConfigValidationError("comment_corpus.excluded_uids 最多 10000 项")
+        if any(len(str(item)) > 64 for item in excluded_uids):
+            raise ConfigValidationError("comment_corpus.excluded_uids 单项不能超过 64 字符")
 
         permissions = _object(config, "permissions")
         for key in (
